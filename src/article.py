@@ -5,6 +5,8 @@ checked against a public-address rule and the socket connects to the address
 that passed, never to the hostname a second time. No cookie jar and no
 credentials are ever attached."""
 import http.client
+import importlib.metadata
+import io
 import ipaddress
 import logging
 import re
@@ -14,6 +16,15 @@ import threading
 import time
 from dataclasses import dataclass
 from urllib.parse import quote, urljoin, urlsplit
+
+try:                                     # optional extra: requirements-capture.txt
+    import trafilatura as _trafilatura
+except ImportError:
+    _trafilatura = None
+try:
+    import pypdf as _pypdf
+except ImportError:
+    _pypdf = None
 
 log = logging.getLogger("yt-obsidian")
 
@@ -271,3 +282,140 @@ def _fetch(url: str, resolver, connector) -> Fetched:
             if conn is not None:
                 conn.close()
     raise FetchError(f"more than {MAX_REDIRECTS} redirects")
+
+
+def _version(module, dist: str) -> str | None:
+    if module is None:
+        return None
+    found = getattr(module, "__version__", None)
+    if found:
+        return str(found)
+    try:
+        return importlib.metadata.version(dist)
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def capture_mode() -> dict:
+    """Which extractors this interpreter has. Full needs both."""
+    full = _trafilatura is not None and _pypdf is not None
+    return {"mode": "full" if full else "fallback",
+            "trafilatura": _version(_trafilatura, "trafilatura"),
+            "pypdf": _version(_pypdf, "pypdf")}
+
+
+def fetch_article(url: str, *, resolver=socket.getaddrinfo, connector=None) -> dict | None:
+    """One GET with redirect following. Returns None for an unsupported
+    content type (image, archive, audio, anything not HTML or PDF). Raises
+    BlockedURL or FetchError. Otherwise returns title, author, date
+    (YYYY-MM-DD or ""), site, text, kind ("article"|"pdf"), source_format
+    ("html"|"pdf"), extraction ("full"|"partial"), word_count, status and
+    reason ("" when full). "full" always means at least MIN_WORDS words."""
+    got = _fetch(url, resolver, connector or _connect)
+    if got.fmt is None:
+        if got.status >= 400:
+            return _result(got, "html", "", {}, f"http {got.status}")
+        return None
+    if got.fmt == "pdf":
+        text, meta, problem = _extract_pdf(got.data)
+    else:
+        text, meta, problem = _extract_html(got.data, got.charset, got.final_url)
+    return _result(got, got.fmt, text, meta, _reason(got, problem, text))
+
+
+def _reason(got: Fetched, problem: str, text: str) -> str:
+    if got.status >= 400:
+        return f"http {got.status}"
+    if got.capped:
+        return "size cap"
+    if problem:
+        return problem
+    if len(text.split()) < MIN_WORDS:
+        return "short"
+    return ""
+
+
+def _result(got: Fetched, fmt: str, text: str, meta: dict, reason: str) -> dict:
+    return {
+        "title": str(meta.get("title") or ""),
+        "author": str(meta.get("author") or ""),
+        "date": str(meta.get("date") or "")[:10],
+        "site": str(meta.get("site") or got.host),
+        "text": text,
+        "kind": "pdf" if fmt == "pdf" else "article",
+        "source_format": fmt,
+        "extraction": "partial" if reason else "full",
+        "word_count": len(text.split()),
+        "status": got.status,
+        "reason": reason,
+    }
+
+
+def _decode(data: bytes, charset: str) -> str:
+    try:
+        return data.decode(charset, errors="replace")
+    except LookupError:
+        return data.decode("utf-8", errors="replace")
+
+
+def _meta_tag_reader(html: str) -> tuple[str, dict]:
+    from src import social      # social imports this module; a top-level import would be circular
+    tags = social._meta_tags(html)
+    meta = {"title": social._meta_content(tags, "og:title", "twitter:title"),
+            "author": social._meta_content(tags, "author", "article:author"),
+            "date": social._meta_content(tags, "article:published_time"),
+            "site": social._meta_content(tags, "og:site_name")}
+    text = social._meta_content(tags, "og:description", "twitter:description", "description")
+    return text, meta
+
+
+def _extract_html(data: bytes, charset: str, url: str) -> tuple[str, dict, str]:
+    if _trafilatura is None:
+        text, meta = _meta_tag_reader(_decode(data, charset))
+        return text, meta, "fallback"
+    # raw bytes: trafilatura does its own charset detection
+    text = _trafilatura.extract(data, url=url, output_format="txt", include_comments=False,
+                                include_tables=True, favor_recall=True) or ""
+    doc = _trafilatura.extract_metadata(data, default_url=url)
+    meta = {} if doc is None else {"title": doc.title, "author": doc.author,
+                                   "date": doc.date, "site": doc.sitename}
+    return text.strip(), meta, ""
+
+
+def _pdf_meta(reader) -> dict:
+    info = reader.metadata
+    if info is None:
+        return {}
+    try:
+        created = info.creation_date
+    except Exception:            # a malformed date string must not cost the text
+        created = None
+    return {"title": info.title or "", "author": info.author or "",
+            "date": created.strftime("%Y-%m-%d") if created else ""}
+
+
+def _extract_pdf(data: bytes) -> tuple[str, dict, str]:
+    if _pypdf is None:
+        return "", {}, "fallback"
+    try:
+        reader = _pypdf.PdfReader(io.BytesIO(data))
+    except Exception as e:       # hostile input can raise far outside PyPdfError
+        log.info("pdf unreadable: %s", e)
+        return "", {}, "unreadable pdf"
+    if reader.is_encrypted:
+        try:
+            opened = reader.decrypt("")      # owner-password-only PDFs open with ""
+        except Exception:
+            opened = 0
+        if not opened:
+            return "", {}, "encrypted"
+    try:
+        pages = reader.pages
+        count = len(pages)
+        texts = [(pages[i].extract_text() or "").strip() for i in range(min(count, MAX_PDF_PAGES))]
+        meta = _pdf_meta(reader)
+    except Exception as e:
+        log.info("pdf unreadable: %s", e)
+        return "", {}, "unreadable pdf"
+    text = "\n\n".join(t for t in texts if t)
+    return text, meta, "page cap" if count > MAX_PDF_PAGES else ""

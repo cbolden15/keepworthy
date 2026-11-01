@@ -1,9 +1,11 @@
 import http.client
+import re
 import socket
 import ssl
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -423,3 +425,249 @@ def test_deadline_bounds_a_real_trickling_socket(monkeypatch, where):
         server.close()
         client.close()
         thread.join(3)
+
+
+# ---- extraction -----------------------------------------------------------
+
+def _fixture(name):
+    return (FIXTURES / name).read_bytes()
+
+
+class _StubTrafilatura:
+    """Stands in for trafilatura where the extra is absent: the body is the
+    <article> text with tags stripped; metadata comes from <title> and the
+    author meta tag."""
+    __version__ = "0-test"
+
+    @staticmethod
+    def extract(data, url=None, **kwargs):
+        match = re.search(r"<article>(.*?)</article>", data.decode("utf-8"), re.S)
+        return re.sub(r"<[^>]+>", " ", match.group(1)) if match else None
+
+    @staticmethod
+    def extract_metadata(data, default_url=None):
+        html = data.decode("utf-8")
+        author = re.search(r'<meta name="author" content="([^"]+)"', html)
+        return SimpleNamespace(title=re.search(r"<title>(.*?)</title>", html).group(1),
+                               author=author.group(1) if author else None,
+                               date="2026-10-01", sitename="Example Notes")
+
+
+@pytest.fixture(params=["stub", "trafilatura"])
+def extractor(request, monkeypatch):
+    if request.param == "trafilatura":
+        monkeypatch.setattr(article, "_trafilatura", pytest.importorskip("trafilatura"))
+    else:
+        monkeypatch.setattr(article, "_trafilatura", _StubTrafilatura)
+    return request.param
+
+
+def test_fetch_article_long_html_is_full(extractor):
+    art = FakeNet(_html(_fixture("article-long.html"))).fetch("https://example.com/notebook")
+    assert art["extraction"] == "full" and art["reason"] == ""
+    assert art["word_count"] >= article.MIN_WORDS
+    assert art["word_count"] == len(art["text"].split())
+    assert art["title"] == "Keeping a Paper Notebook That Lasts"
+    assert art["author"] == "Example Author"
+    assert (art["kind"], art["source_format"], art["status"]) == ("article", "html", 200)
+    assert "acid-free tape" in art["text"]
+
+
+def test_fetch_article_short_html_is_partial_short(extractor):
+    art = FakeNet(_html(_fixture("article-short.html"))).fetch("https://example.com/pencils")
+    assert (art["extraction"], art["reason"]) == ("partial", "short")
+    assert art["word_count"] < article.MIN_WORDS
+
+
+def test_fetch_article_403_is_partial():
+    resp = _html(_fixture("article-paywall.html"), status=403)
+    art = FakeNet(resp).fetch("https://example.com/field-notes")
+    assert (art["extraction"], art["reason"], art["status"]) == ("partial", "http 403", 403)
+    assert (art["kind"], art["source_format"]) == ("article", "html")
+
+
+def test_fetch_article_404_is_partial_without_text():
+    art = FakeNet(_html(status=404)).fetch("https://example.com/missing")
+    assert (art["extraction"], art["reason"], art["status"], art["text"]) == (
+        "partial", "http 404", 404, "")
+    assert art["site"] == "example.com" and art["word_count"] == 0
+
+
+def test_fetch_article_fallback_without_extra(monkeypatch):
+    monkeypatch.setattr(article, "_trafilatura", None)
+    art = FakeNet(_html(_fixture("article-long.html"))).fetch("https://example.com/notebook")
+    assert (art["extraction"], art["reason"]) == ("partial", "fallback")
+    assert art["title"] == "Keeping a Paper Notebook That Lasts"
+    assert art["text"] == "Plain habits for a notebook you will still read in ten years."
+    assert (art["author"], art["site"], art["date"]) == (
+        "Example Author", "Example Notes", "2026-10-01")
+
+
+def test_fetch_article_fallback_decodes_declared_charset(monkeypatch):
+    monkeypatch.setattr(article, "_trafilatura", None)
+    body = '<html><head><meta property="og:title" content="Café notes"></head></html>'
+    resp = _html(body.encode("latin-1"), headers={"Content-Type": "text/html; charset=ISO-8859-1"})
+    assert FakeNet(resp).fetch("https://example.com/cafe")["title"] == "Café notes"
+
+
+def test_fetch_article_unsupported_type_returns_none():
+    png = FakeResponse(200, {"Content-Type": "image/png"}, b"\x89PNG\r\n\x1a\n" + b"\0" * 64)
+    assert FakeNet(png).fetch("https://example.com/photo.png") is None
+
+
+def test_fetch_article_size_cap_is_partial(monkeypatch):
+    monkeypatch.setattr(article, "_trafilatura", None)
+    body = b"<html><head></head><body>" + b"x " * (3 * 1024 * 1024)
+    art = FakeNet(_html(body)).fetch("https://example.com/huge")
+    assert (art["extraction"], art["reason"]) == ("partial", "size cap")
+
+
+# ---- PDF ------------------------------------------------------------------
+
+PDF = {"Content-Type": "application/pdf"}
+SAMPLE_PAGES = [" ".join(["Page one sentence about synthetic notes."] * 20),
+                " ".join(["Page two sentence about synthetic notes."] * 20)]
+
+
+def _pdf_string(text):
+    return text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def _make_pdf(pages, title="Synthetic Sample", author="Example Author"):
+    """A minimal valid PDF with Helvetica text, built from the stdlib only, so
+    fixtures never depend on the optional extra being installed."""
+    objects = [b"", b""]                     # 1 catalog, 2 page tree; filled in below
+
+    def add(body):
+        objects.append(body)
+        return len(objects)
+
+    font = add(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    kids = []
+    for text in pages:
+        words = text.split()
+        lines = [" ".join(words[i:i + 12]) for i in range(0, len(words), 12)] or [""]
+        ops = ["BT", "/F1 11 Tf", "14 TL", "72 760 Td"]
+        ops += [f"({_pdf_string(line)}) Tj T*" for line in lines]
+        ops.append("ET")
+        stream = "\n".join(ops).encode("latin-1")
+        content = add(b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"\nendstream")
+        kids.append(add(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+                        b"/Resources << /Font << /F1 %d 0 R >> >> /Contents %d 0 R >>"
+                        % (font, content)))
+    objects[0] = b"<< /Type /Catalog /Pages 2 0 R >>"
+    objects[1] = b"<< /Type /Pages /Kids [%s] /Count %d >>" % (
+        b" ".join(b"%d 0 R" % kid for kid in kids), len(kids))
+    info = add(b"<< /Title (%s) /Author (%s) /CreationDate (D:20261001120000Z) >>"
+               % (title.encode("latin-1"), author.encode("latin-1")))
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for number, body in enumerate(objects, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % number + body + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
+    out += b"".join(b"%010d 00000 n \n" % offset for offset in offsets)
+    out += (b"trailer\n<< /Size %d /Root 1 0 R /Info %d 0 R >>\nstartxref\n%d\n%%%%EOF\n"
+            % (len(objects) + 1, info, xref))
+    return bytes(out)
+
+
+def _stub_pypdf(pages=(), *, encrypted=False, error=None):
+    class Page:
+        def __init__(self, text):
+            self._text = text
+
+        def extract_text(self):
+            return self._text
+
+    class Reader:
+        def __init__(self, stream):
+            if error is not None:
+                raise error
+            self.is_encrypted = encrypted
+            self.pages = [Page(text) for text in pages]
+            self.metadata = None
+
+        def decrypt(self, password):
+            return 0
+
+    return SimpleNamespace(PdfReader=Reader, __version__="0-test")
+
+
+def test_sample_pdf_fixture_is_reproducible():
+    data = _fixture("sample.pdf")
+    assert data == _make_pdf(SAMPLE_PAGES) and len(data) < 10 * 1024
+
+
+def test_fetch_article_pdf(monkeypatch):
+    monkeypatch.setattr(article, "_pypdf", pytest.importorskip("pypdf"))
+    art = FakeNet(FakeResponse(200, PDF, _fixture("sample.pdf"))).fetch(
+        "https://example.com/sample.pdf")
+    assert (art["kind"], art["source_format"], art["extraction"]) == ("pdf", "pdf", "full")
+    assert "Page one sentence" in art["text"] and "Page two sentence" in art["text"]
+    assert (art["title"], art["author"], art["date"]) == (
+        "Synthetic Sample", "Example Author", "2026-10-01")
+
+
+def test_pdf_page_cap(monkeypatch):
+    monkeypatch.setattr(article, "_pypdf", pytest.importorskip("pypdf"))
+    data = _make_pdf([f"Marker {n:04d} page" for n in range(1, 302)])
+    art = FakeNet(FakeResponse(200, PDF, data)).fetch("https://example.com/long.pdf")
+    assert (art["extraction"], art["reason"]) == ("partial", "page cap")
+    assert "Marker 0300" in art["text"] and "Marker 0301" not in art["text"]
+
+
+def test_fetch_article_pdf_sniffed_from_magic_bytes(monkeypatch):
+    monkeypatch.setattr(article, "_pypdf", _stub_pypdf([" ".join(["word"] * 200)]))
+    resp = FakeResponse(200, {"Content-Type": "application/octet-stream"}, b"%PDF-1.4\n%stub\n")
+    art = FakeNet(resp).fetch("https://example.com/download?id=7")
+    assert (art["kind"], art["source_format"], art["extraction"], art["word_count"]) == (
+        "pdf", "pdf", "full", 200)
+
+
+def test_pdf_page_cap_with_stub_reader(monkeypatch):
+    monkeypatch.setattr(article, "_pypdf",
+                        _stub_pypdf([f"Marker {n:04d} page" for n in range(1, 302)]))
+    art = FakeNet(FakeResponse(200, PDF, b"%PDF-1.4 stub")).fetch("https://example.com/long.pdf")
+    assert (art["extraction"], art["reason"]) == ("partial", "page cap")
+    assert "Marker 0300" in art["text"] and "Marker 0301" not in art["text"]
+
+
+def test_pdf_encrypted_is_partial(monkeypatch):
+    monkeypatch.setattr(article, "_pypdf", _stub_pypdf(["secret words"], encrypted=True))
+    art = FakeNet(FakeResponse(200, PDF, b"%PDF-1.4 stub")).fetch("https://example.com/locked.pdf")
+    assert (art["kind"], art["extraction"], art["reason"], art["text"]) == (
+        "pdf", "partial", "encrypted", "")
+
+
+def test_pdf_unreadable_is_partial(monkeypatch):
+    monkeypatch.setattr(article, "_pypdf", _stub_pypdf(error=ValueError("bad xref")))
+    art = FakeNet(FakeResponse(200, PDF, b"%PDF-1.4 junk")).fetch("https://example.com/bad.pdf")
+    assert (art["extraction"], art["reason"], art["text"]) == ("partial", "unreadable pdf", "")
+
+
+def test_pdf_without_extra_is_partial_fallback(monkeypatch):
+    monkeypatch.setattr(article, "_pypdf", None)
+    art = FakeNet(FakeResponse(200, PDF, b"%PDF-1.4 stub")).fetch("https://example.com/a.pdf")
+    assert (art["kind"], art["extraction"], art["reason"], art["text"]) == (
+        "pdf", "partial", "fallback", "")
+
+
+# ---- capability report ------------------------------------------------------
+
+def test_capture_mode_reports_versions():
+    pytest.importorskip("trafilatura")
+    pytest.importorskip("pypdf")
+    mode = article.capture_mode()
+    assert mode["mode"] == "full" and mode["trafilatura"] and mode["pypdf"]
+
+
+def test_capture_mode_falls_back_when_either_import_is_missing(monkeypatch):
+    monkeypatch.setattr(article, "_trafilatura", None)
+    monkeypatch.setattr(article, "_pypdf", None)
+    assert article.capture_mode() == {"mode": "fallback", "trafilatura": None, "pypdf": None}
+    monkeypatch.setattr(article, "_trafilatura", _StubTrafilatura)
+    assert article.capture_mode() == {"mode": "fallback", "trafilatura": "0-test", "pypdf": None}
+    monkeypatch.setattr(article, "_pypdf", _stub_pypdf())
+    assert article.capture_mode() == {"mode": "full", "trafilatura": "0-test", "pypdf": "0-test"}

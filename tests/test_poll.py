@@ -1,6 +1,7 @@
 from dataclasses import replace
 import logging
 import subprocess
+import pytest
 from types import SimpleNamespace
 from pathlib import Path
 from src import state
@@ -488,3 +489,19 @@ def test_run_without_channels_never_lists_channels(tmp_path):
 
     deps = base_deps(list_channel_ids=boom)
     assert [vid for vid, _ in poll.run(cfg, tmp_path, "2026-10-05", deps)] == ["v1"]
+
+@pytest.mark.parametrize("mode,line", [
+    ({"mode": "full", "trafilatura": "2.3.1", "pypdf": "6.21.1"},
+     "article capture: full (trafilatura 2.3.1, pypdf 6.21.1)"),
+    ({"mode": "fallback", "trafilatura": None, "pypdf": None},
+     "article capture: fallback (meta tags only; install requirements-capture.txt)"),
+])
+def test_main_logs_the_article_capture_mode(monkeypatch, tmp_path, caplog, mode, line):
+    from src import article, social
+    monkeypatch.setattr(poll, "run", lambda cfg, root, processed, deps: [])
+    monkeypatch.setattr(social, "drain_social_queue", lambda cfg, root, processed: [])
+    monkeypatch.setattr(article, "capture_mode", lambda: mode)
+    _stub_main_config(monkeypatch, tmp_path)
+    with caplog.at_level(logging.INFO, logger="yt-obsidian"):
+        poll.main()
+    assert line in caplog.messages
