@@ -16,7 +16,7 @@ from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 from src import config as config_mod
-from src import gemini, ingest, open_brain_bridge, state
+from src import article, gemini, ingest, open_brain_bridge, state
 from src import meta as meta_mod, note as note_mod, summarize
 from src import finance_content
 from src import local_media, saved_media, visuals
@@ -223,6 +223,7 @@ def fetch_social_media(url, cookies_path, tmpdir, runner=subprocess.run) -> dict
 
 def _default_deps(cfg=None):
     return SimpleNamespace(
+        fetch_article=article.fetch_article,
         fetch_social_media=fetch_social_media,
         fetch_page_text=fetch_page_text,
         transcribe_audio=gemini.transcribe_audio,
@@ -234,18 +235,34 @@ def _default_deps(cfg=None):
         build_social_stub_note=note_mod.build_social_stub_note,
     )
 
-def _payload(platform, url, meta, transcript, page, why, shared_text) -> str:
+_REFUSED_REASON = "This url was refused (private or non-http address); saved for manual review."
+_TRUNCATED_FOR_MODEL = (f"[truncated for the model at {article.MAX_MODEL_CHARS:,} characters; "
+                        "the note keeps the full text]")
+
+
+def _payload(platform, url, meta, transcript, page, why, shared_text,
+             article_text: str = "", article_meta: dict | None = None) -> str:
     parts = [f"## Platform\n{platform}", f"## URL\n{url}"]
     if why:
         parts.append(f"## Why saved\n{why}")
     if meta.get("title"):
         parts.append(f"## Title\n{meta['title']}")
+    if article_meta and article_meta.get("site"):
+        parts.append(f"## Site\n{article_meta['site']}")
+    if article_meta and article_meta.get("date"):
+        parts.append(f"## Date\n{article_meta['date']}")
     if meta.get("caption"):
         parts.append(f"## Caption\n{meta['caption']}")
     if transcript:
         parts.append(f"## Transcript\n{transcript}")
     if page and page.get("text"):
         parts.append(f"## Page text\n{page.get('title', '')}\n{page['text']}")
+    if article_text:
+        # untrusted page text, in the user payload exactly like transcripts
+        section = f"## Source text\n{article_text}"
+        if len((article_meta or {}).get("text") or "") > len(article_text):
+            section += "\n\n" + _TRUNCATED_FOR_MODEL
+        parts.append(section)
     if shared_text:
         parts.append(f"## Shared note\n{shared_text}")
     return "\n\n".join(parts)
@@ -288,7 +305,7 @@ def _write_social_note(cfg, post_meta, key, content, topic,
     tmp.replace(path)
     return path
 
-def _write_stub(cfg, post_meta, key, status, shared_text, processed, deps) -> str:
+def _write_stub(cfg, post_meta, key, status, shared_text, processed, deps, reason="") -> str:
     """Terminal note for a share that will never be summarized. The note is
     written before mark_seen, so a crash in between redelivers the item rather
     than losing it. A write failure here propagates: the item stays queued,
@@ -296,11 +313,13 @@ def _write_stub(cfg, post_meta, key, status, shared_text, processed, deps) -> st
 
     No model output ran for this item. Deterministic content kinds such as an
     event still retain their known filing route; everything else falls back
-    to Other/General."""
+    to Other/General. A non-empty reason replaces the status text in the body."""
     # stamped on every stub, not just the url-less ones: harmless when a real
     # url is also present (identity still keys on url there), and it is what
     # lets _write_social_note key a url-less item on itself.
     post_meta = {**post_meta, "item_key": key}
+    if reason:
+        post_meta["stub_reason"] = reason
     stub = deps.build_social_stub_note(post_meta, status, shared_text, processed)
     topic, subtopic = filing_route({}, post_meta.get("content_kind", "other"))
     _write_social_note(cfg, post_meta, key, stub, topic, subtopic, processed)
@@ -313,6 +332,33 @@ def _bare_post_meta(url: str) -> dict:
     return {"platform": platform, "source_type": source_type_for(platform),
             "content_kind": content_kind_for(url, platform), "url": url or "",
             "author": "", "title": "", "caption": "", "date": "", "kind": "text"}
+
+def _capture_fields(item) -> dict:
+    return {"capture_why": item.get("why", ""),
+            "capture_context_at": item.get("received_at", ""),
+            "capture_source": "saved_feed" if item.get("capture_source") == "saved_feed" else "share"}
+
+
+def _article_fields(art: dict) -> dict:
+    """post_meta keys that switch on the capture frontmatter and name the
+    reason a thin note gives."""
+    return {"extraction": art["extraction"], "word_count": art["word_count"],
+            "source_format": art["source_format"], "extraction_reason": art["reason"]}
+
+
+def _article_fetch_failed(cfg, item, url, key, shared_text, processed, deps, err) -> str:
+    """The retry policy of an empty media fetch, without the media tools:
+    yt-dlp against a host that just timed out burns minutes for nothing."""
+    attempts = state.record_attempt(cfg.state_path, key)
+    log.warning("article fetch failed for %s (attempt %d): %s", url, attempts, err)
+    if attempts < cfg.max_attempts:
+        return "retry"
+    post_meta = {**_bare_post_meta(url), **_capture_fields(item)}
+    _emit_saved_item(cfg, item, post_meta, key, "failed")
+    try:
+        return _write_stub(cfg, post_meta, key, "fetch-failed", shared_text, processed, deps)
+    except Exception as stub_err:    # still propagates, but the
+        raise _CountedFailure(attempts) from stub_err   # attempt is spent
 
 def _invalid_stub(cfg, item, url, processed, deps) -> str:
     # no url means no url_key, so the note is keyed by the item itself: a
@@ -367,15 +413,19 @@ def _emit_saved_item(cfg, item, post_meta, key, fetch_status, *, summary=None,
         return False
 
 
-def _emit_fetched_saved_item(cfg, item, post_meta, key, media, page, transcript, *, summary=None):
+def _emit_fetched_saved_item(cfg, item, post_meta, key, media, page, transcript, *, summary=None,
+                             article_text=""):
     try:
         if cfg.open_brain_saved_spool_dir is None:
             return False
-        body = "\n\n".join(
+        body = article_text or "\n\n".join(
             part for part in (media["meta"].get("caption") or "",
                               (page or {}).get("text") or "") if part)
-        fetch_status = ("partial" if media["kind"] == "video" and transcript is None
-                        else "complete")
+        if article_text:                 # the text path: a capped read is partial
+            fetch_status = "partial" if post_meta.get("extraction") == "partial" else "complete"
+        else:
+            fetch_status = ("partial" if media["kind"] == "video" and transcript is None
+                            else "complete")
         return _emit_saved_item(cfg, item, post_meta, key, fetch_status,
                                 summary=summary, body=body, media_text=transcript or "")
     except Exception as e:
@@ -404,8 +454,33 @@ def process_social_item(cfg, project_root, item, processed, deps, key, prompt_te
     shared_text = item.get("text")
     why = item.get("why", "")
 
+    # Generic urls try the article reader first. A refused address or a dead
+    # host ends here without the media tools; an unsupported type (None) or
+    # another partial read falls through to them, in case the page is mostly a video.
+    art = None
+    if platform == "generic":
+        try:
+            art = deps.fetch_article(url)
+        except article.BlockedURL as e:
+            log.warning("refused %s: %s", url, e)
+            return _write_stub(cfg, {**_bare_post_meta(url), **_capture_fields(item)}, key,
+                               "invalid", shared_text, processed, deps, reason=_REFUSED_REASON)
+        except article.FetchError as e:
+            return _article_fetch_failed(cfg, item, url, key, shared_text, processed, deps, e)
+    # A capped read (HTML over the size cap, PDF over the page cap) with
+    # enough words is summarized from the text that was read.
+    text_path = art is not None and (art["extraction"] == "full" or (
+        art["extraction"] == "partial" and art["word_count"] >= article.MIN_WORDS
+        and ((art["reason"] == "size cap" and art["source_format"] == "html")
+             or art["reason"] == "page cap")))
+    article_text = art["text"] if text_path else ""
+
     with tempfile.TemporaryDirectory() as td:   # media lives here; claude reads
-        if free and item.get("capture_source") == "saved_feed":
+        if text_path:                            # the article is the content
+            media = {"kind": "none", "files": [], "meta": {
+                "title": art["title"], "author": art["author"], "caption": "",
+                "date": art["date"]}}
+        elif free and item.get("capture_source") == "saved_feed":
             media = deps.fetch_saved_media(url, cfg.cookies_path, td)
         else:
             media = deps.fetch_social_media(url, cfg.cookies_path, td)
@@ -443,7 +518,8 @@ def process_social_item(cfg, project_root, item, processed, deps, key, prompt_te
                     log.warning("transcription failed for %s: %s", url, e)
         elif media["kind"] == "images":
             images = media["files"]
-        if media["kind"] == "none" or (media["kind"] == "video" and transcript is None):
+        if not text_path and (media["kind"] == "none"
+                              or (media["kind"] == "video" and transcript is None)):
             try:
                 page = deps.fetch_page_text(url, cfg.cookies_path)
             except FetchError as e:
@@ -464,11 +540,23 @@ def process_social_item(cfg, project_root, item, processed, deps, key, prompt_te
             "_media_refresh": refresh,
             "_private_media": free,
         }
+        if art is not None:
+            post_meta.update(_article_fields(art))
+            for field in ("title", "author", "date"):
+                post_meta[field] = post_meta[field] or art[field]
+        if text_path:
+            post_meta["content_kind"] = "article"       # pre-model default
         # the sharer's own note deliberately does not count as content: summarizing
         # it alone would produce a note about a post nothing ever managed to read.
         # The stub keeps that text, so it is preserved either way.
-        has_content = bool(transcript or images or media["meta"].get("caption")
-                           or (page and page.get("text")))
+        has_content = text_path or bool(transcript or images or media["meta"].get("caption")
+                                        or (page and page.get("text")))
+        if not has_content and art is not None:
+            # a partial article and nothing from the media tools: a thin note
+            # now. Retrying would only fetch the same paywall or teaser again.
+            post_meta["kind"] = "text"            # nothing from the media tools made it in
+            _emit_saved_item(cfg, item, post_meta, key, "partial", body=art["text"])
+            return _write_stub(cfg, post_meta, key, "partial", shared_text, processed, deps)
         if not has_content:                   # fetch failure → same retry policy
             attempts = state.record_attempt(cfg.state_path, key)  # as the claude path below
             log.warning("fetch failed for %s (attempt %d)", url, attempts)
@@ -481,7 +569,9 @@ def process_social_item(cfg, project_root, item, processed, deps, key, prompt_te
                     raise _CountedFailure(attempts) from stub_err   # attempt is spent
             return "retry"
 
-        payload = _payload(platform, url, media["meta"], transcript, page, why, shared_text)
+        payload = _payload(platform, url, media["meta"], transcript, page, why, shared_text,
+                           article_text=article_text[:article.MAX_MODEL_CHARS],
+                           article_meta=art)
         try:
             observations=[]
             if free and images:
@@ -495,7 +585,8 @@ def process_social_item(cfg, project_root, item, processed, deps, key, prompt_te
             attempts = state.record_attempt(cfg.state_path, key)
             log.warning("social summarize failed for %s (attempt %d): %s", url, attempts, e)
             if attempts >= cfg.max_attempts:
-                _emit_fetched_saved_item(cfg, item, post_meta, key, media, page, transcript)
+                _emit_fetched_saved_item(cfg, item, post_meta, key, media, page, transcript,
+                                         article_text=article_text)
                 try:
                     return _write_stub(cfg, post_meta, key, "summary-failed",
                                        shared_text, processed, deps)
@@ -504,12 +595,17 @@ def process_social_item(cfg, project_root, item, processed, deps, key, prompt_te
             return "retry"
 
     model_meta, body = deps.parse_model_output(raw_out)
-    content_kind = content_kind_for(url, platform, model_meta.get("content_kind"))
+    model_kind = model_meta.get("content_kind")
+    content_kind = content_kind_for(url, platform, model_kind)
+    if text_path and model_kind not in CONTENT_KINDS and content_kind == "other":
+        content_kind = "article"             # the text path's default; event hosts keep "event"
     post_meta["content_kind"] = content_kind
     private_body = finance_content.annotate(cfg, model_meta, body, payload, key)
     if private_body != body:
         post_meta["_sure_context_added"] = True
-    content = deps.build_social_note(post_meta, model_meta, private_body, transcript, processed)
+    note_extra = {"source_text": article_text} if text_path else {}
+    content = deps.build_social_note(post_meta, model_meta, private_body, transcript, processed,
+                                     **note_extra)
     if free:
         if observations:
             content += "\n\n## Source image/frame observations\n\n" + visuals.render(observations) + "\n"
@@ -523,7 +619,7 @@ def process_social_item(cfg, project_root, item, processed, deps, key, prompt_te
     topic, subtopic = filing_route(model_meta, content_kind)
     _write_social_note(cfg, post_meta, key, content, topic, subtopic, processed)
     _emit_fetched_saved_item(cfg, item, post_meta, key, media, page, transcript,
-                             summary=body)
+                             summary=body, article_text=article_text)
     state.mark_seen(cfg.state_path, key)
     if free:
         state.mark_media_processed(cfg.state_path,key)

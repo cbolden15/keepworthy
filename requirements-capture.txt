@@ -1,0 +1,2 @@
+# Optional article and PDF extraction; Linux and macOS CPython 3.12, wheels only.
+-r requirements-capture.lock

@@ -347,6 +347,7 @@ def _no_media(url, ck, td, **kw):
 
 def _deps(**over):
     base = dict(
+        fetch_article=lambda url: None,
         fetch_social_media=_video_media,
         fetch_page_text=lambda url, ck: {"title": "", "text": "", "author": ""},
         transcribe_audio=lambda p, k, m: "spoken words",
@@ -1104,3 +1105,276 @@ def test_non_string_caption_does_not_change_share_outcome(tmp_path, monkeypatch,
     assert state_mod.load_state(cfg.state_path)["attempts"] == {}
     assert list((tmp_path / "vault" / "saved-content").rglob("*.md"))
     assert not cfg.queue_path.exists()
+
+
+# ---- generic urls through the article reader --------------------------------
+
+from src import article
+
+
+def _art(text, extraction="full", reason="", **over):
+    """A fetch_article result; word_count follows the text unless overridden."""
+    out = {"title": "A Long Read", "author": "Example Author", "date": "2026-10-01",
+           "site": "Example Notes", "text": text, "kind": "article", "source_format": "html",
+           "extraction": extraction, "word_count": len(text.split()), "status": 200,
+           "reason": reason}
+    out.update(over)
+    return out
+
+
+def _never(*a, **k):
+    raise AssertionError("must not be called on this path")
+
+
+def _only_note(tmp_path):
+    [path] = list((tmp_path / "vault" / "saved-content").rglob("*.md"))
+    return path.read_text()
+
+
+def test_default_deps_wire_fetch_article():
+    assert social._default_deps().fetch_article is article.fetch_article
+
+
+def test_generic_long_article_skips_media_tools(tmp_path):
+    cfg = _cfg(tmp_path)
+    text = " ".join(f"w{i}" for i in range(400))
+    seen = {}
+
+    def claude(prompt, payload, images, model, cwd):
+        seen["payload"], seen["images"] = payload, images
+        return _MODEL_OUT
+    deps = _deps(fetch_article=lambda url: _art(text), fetch_social_media=_never,
+                 fetch_page_text=_never, transcribe_audio=_never, run_claude_social=claude)
+    item = {"url": "https://example.com/long-read", "text": None}
+    assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "summarized"
+    note = _only_note(tmp_path)
+    fm = note.split("---")[1]
+    assert ('type: "text"\nextraction: "full"\nword_count: 400\nsource_format: "html"\n'
+            'category: "ai-dev"') in fm
+    assert 'platform: "generic"' in fm and 'source_type: "web"' in fm
+    assert 'content_kind: "article"' in fm and 'status: "summarized"' in fm
+    assert 'title: "A Long Read"' in fm and 'author: "Example Author"' in fm
+    assert "> [!note]- Full source text\n> " + text in note
+    assert "## Source text\n" + text in seen["payload"]
+    assert "## Site\nExample Notes" in seen["payload"] and "## Date\n2026-10-01" in seen["payload"]
+    assert seen["images"] == []
+    assert state_mod.is_seen(state_mod.load_state(cfg.state_path), url_key(item["url"]))
+
+
+def test_generic_article_payload_is_capped_for_model(tmp_path):
+    cfg = _cfg(tmp_path)
+    text = "alpha " * 11_667                     # 70,002 characters
+    seen = {}
+
+    def claude(prompt, payload, images, model, cwd):
+        seen["payload"] = payload
+        return _MODEL_OUT
+    deps = _deps(fetch_article=lambda url: _art(text), run_claude_social=claude)
+    item = {"url": "https://example.com/capped", "text": None}
+    assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "summarized"
+    assert seen["payload"].count("alpha") == 10_000
+    assert ("alpha \n\n[truncated for the model at 60,000 characters; "
+            "the note keeps the full text]") in seen["payload"]
+    assert _only_note(tmp_path).count("alpha") == 11_667
+
+
+def test_generic_short_article_falls_through_to_media(tmp_path):
+    cfg = _cfg(tmp_path)
+    deps = _deps(fetch_article=lambda url: _art("only a few words", "partial", "short"))
+    item = {"url": "https://example.com/clip-page", "text": None}
+    assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "summarized"
+    note = _only_note(tmp_path)
+    assert "> [!note]- Full transcript" in note and "Full source text" not in note
+    assert 'extraction: "partial"' in note.split("---")[1]
+
+
+def test_generic_403_writes_partial_note_now(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    monkeypatch.setattr(social.state, "record_attempt", _never)
+    paywall = _art("teaser words", "partial", "http 403", status=403, title="Paywalled")
+    deps = _deps(fetch_article=lambda url: paywall, fetch_social_media=_no_media,
+                 run_claude_social=_never)
+    item = {"url": "https://example.com/paywalled", "text": "read later",
+            "why": "Pricing research"}
+    assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "partial"
+    note = _only_note(tmp_path)
+    fm = note.split("---")[1]
+    assert 'status: "partial"' in fm and 'title: "Paywalled"' in fm
+    assert 'extraction: "partial"' in fm and 'word_count: 2' in fm
+    assert "Only part of this page could be fetched (http 403)" in note
+    assert "## Why saved\nPricing research" in note and "> Shared note: read later" in note
+    assert state_mod.is_seen(state_mod.load_state(cfg.state_path), url_key(item["url"]))
+
+
+def test_generic_5xx_counts_attempt_and_retries(tmp_path):
+    cfg = _cfg(tmp_path)                         # MAX_ATTEMPTS=2
+
+    def down(url):
+        raise article.FetchError("http 503")
+    deps = _deps(fetch_article=down, fetch_social_media=_never, fetch_page_text=_never)
+    item = {"url": "https://example.com/down", "text": "keep me"}
+    key = url_key(item["url"])
+    assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "retry"
+    assert state_mod.load_state(cfg.state_path)["attempts"][key] == 1
+    assert not (tmp_path / "vault").exists()
+    assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "fetch-failed"
+    stub = _only_note(tmp_path)
+    assert 'status: "fetch-failed"' in stub and "keep me" in stub
+    assert state_mod.is_seen(state_mod.load_state(cfg.state_path), key)
+
+
+def test_generic_blocked_url_writes_invalid_stub(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    monkeypatch.setattr(social.state, "record_attempt", _never)
+
+    def blocked(url):
+        raise article.BlockedURL("resolves to 10.0.0.5")
+    deps = _deps(fetch_article=blocked, fetch_social_media=_never, fetch_page_text=_never)
+    item = {"url": "https://intranet.example.com/admin", "text": "why not", "why": "Check this"}
+    assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "invalid"
+    stub = _only_note(tmp_path)
+    assert 'status: "invalid"' in stub and item["url"] in stub and "why not" in stub
+    assert "This url was refused (private or non-http address)" in stub
+    assert "## Why saved\nCheck this" in stub
+    assert state_mod.is_seen(state_mod.load_state(cfg.state_path), url_key(item["url"]))
+
+
+def test_generic_unsupported_type_uses_media_path(tmp_path):
+    cfg = _cfg(tmp_path)
+
+    def images_media(url, ck, td, **kw):
+        img = Path(td) / "post_1.jpg"
+        img.write_bytes(b"img")
+        return {"kind": "images", "files": [img],
+                "meta": {"title": "P", "author": "@a", "caption": "cap", "date": "2026-07-02"}}
+    deps = _deps(fetch_article=lambda url: None, fetch_social_media=images_media)
+    item = {"url": "https://example.com/photo.png", "text": None}
+    assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "summarized"
+    assert "extraction:" not in _only_note(tmp_path)
+
+
+def test_social_platform_never_calls_fetch_article(tmp_path):
+    cfg = _cfg(tmp_path)
+    item = {"url": "https://www.instagram.com/reel/A/", "text": None}
+    assert _process(cfg, tmp_path, item, "2026-11-01", _deps(fetch_article=_never)) == "summarized"
+
+
+def test_generic_text_path_keeps_a_model_content_kind(tmp_path):
+    cfg = _cfg(tmp_path)
+    text = " ".join(f"w{i}" for i in range(200))
+    deps = _deps(fetch_article=lambda url: _art(text),
+                 parse_model_output=lambda raw: ({"category": "shopping", "topic": "Other",
+                                                  "content_kind": "product", "tags": []}, "body"))
+    item = {"url": "https://example.com/gadget", "text": None}
+    assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "summarized"
+    assert 'content_kind: "product"' in _only_note(tmp_path)
+
+
+def test_generic_article_saved_items_carry_text_and_status(tmp_path):
+    cfg = _cfg(tmp_path, OPEN_BRAIN_SAVED_SPOOL_DIR=f"{tmp_path}/saved")
+    text = " ".join(f"w{i}" for i in range(300))
+    full = {"url": "https://example.com/full", "why": "read"}
+    thin = {"url": "https://example.com/paywalled", "why": "read"}
+    arts = {full["url"]: _art(text),
+            thin["url"]: _art("teaser words", "partial", "http 403", status=403)}
+    deps = _deps(fetch_article=arts.get, fetch_social_media=_no_media)
+    assert _process(cfg, tmp_path, full, "2026-11-01", deps) == "summarized"
+    assert _process(cfg, tmp_path, thin, "2026-11-01", deps) == "partial"
+    records = {r["url"]: r for r in _saved(tmp_path)}
+    assert (records[full["url"]]["fetch_status"], records[full["url"]]["body"]) == ("complete", text)
+    assert (records[full["url"]]["source_type"], records[full["url"]]["content_kind"]) == ("web", "article")
+    assert (records[thin["url"]]["fetch_status"], records[thin["url"]]["body"]) == ("partial", "teaser words")
+
+
+def test_generic_size_capped_long_page_takes_text_path(tmp_path):
+    cfg = _cfg(tmp_path, OPEN_BRAIN_SAVED_SPOOL_DIR=f"{tmp_path}/saved")
+    text = " ".join(f"w{i}" for i in range(400))
+    seen = {}
+
+    def claude(prompt, payload, images, model, cwd):
+        seen["payload"] = payload
+        return _MODEL_OUT
+    deps = _deps(fetch_article=lambda url: _art(text, "partial", "size cap"),
+                 fetch_social_media=_never, fetch_page_text=_never, run_claude_social=claude)
+    item = {"url": "https://example.com/huge-page", "text": None}
+    assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "summarized"
+    assert "## Source text\n" + text in seen["payload"]
+    note = _only_note(tmp_path)
+    fm = note.split("---")[1]
+    assert 'extraction: "partial"' in fm and "word_count: 400" in fm
+    assert "> [!note]- Full source text (cut at the 5 MB size cap)\n> " + text in note
+    [record] = _saved(tmp_path)
+    assert (record["fetch_status"], record["body"]) == ("partial", text)
+
+
+def test_generic_size_capped_short_page_falls_through(tmp_path):
+    cfg = _cfg(tmp_path)
+    calls = []
+
+    def media(*args, **kw):
+        calls.append(True)
+        return _no_media(*args, **kw)
+    deps = _deps(fetch_article=lambda url: _art("only a few words", "partial", "size cap"),
+                 fetch_social_media=media, run_claude_social=_never)
+    item = {"url": "https://example.com/huge-teaser", "text": None}
+    assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "partial"
+    assert calls == [True]
+    note = _only_note(tmp_path)
+    assert 'status: "partial"' in note and "Only part of this page could be fetched (size cap)" in note
+
+
+def test_generic_size_capped_pdf_keeps_media_fallback(tmp_path):
+    cfg = _cfg(tmp_path)
+    text = " ".join(f"w{i}" for i in range(400))
+    calls = []
+
+    def media(*args, **kw):
+        calls.append(True)
+        return _video_media(*args, **kw)
+    deps = _deps(fetch_article=lambda url: _art(text, "partial", "size cap",
+                                                source_format="pdf", kind="pdf"),
+                 fetch_social_media=media)
+    item = {"url": "https://example.com/huge.pdf", "text": None}
+    assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "summarized"
+    assert calls == [True]
+    assert "Full source text" not in _only_note(tmp_path)
+
+
+def test_generic_page_capped_pdf_takes_text_path(tmp_path):
+    cfg = _cfg(tmp_path)
+    text = " ".join(f"w{i}" for i in range(400))
+    deps = _deps(fetch_article=lambda url: _art(text, "partial", "page cap",
+                                                source_format="pdf", kind="pdf"),
+                 fetch_social_media=_never, fetch_page_text=_never)
+    item = {"url": "https://example.com/long.pdf", "text": None}
+    assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "summarized"
+    note = _only_note(tmp_path)
+    assert 'extraction: "partial"' in note and 'source_format: "pdf"' in note
+    assert "> [!note]- Full source text (first 300 pages)\n> " + text in note
+
+
+def test_generic_partial_with_empty_video_writes_text_kind(tmp_path):
+    cfg = _cfg(tmp_path)
+
+    def silent_video(url, ck, td, **kw):
+        out = _video_media(url, ck, td)
+        out["meta"]["caption"] = ""
+        return out
+    deps = _deps(fetch_article=lambda url: _art("teaser words", "partial", "http 403"),
+                 fetch_social_media=silent_video, transcribe_audio=lambda p, k, m: None,
+                 run_claude_social=_never)
+    item = {"url": "https://example.com/teaser-video", "text": None}
+    assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "partial"
+    assert 'type: "text"' in _only_note(tmp_path).split("---")[1]
+
+
+def test_generic_text_path_model_failure_keeps_article_body(tmp_path):
+    cfg = _cfg(tmp_path, MAX_ATTEMPTS=1, OPEN_BRAIN_SAVED_SPOOL_DIR=f"{tmp_path}/saved")
+    text = " ".join(f"w{i}" for i in range(300))
+    deps = _deps(fetch_article=lambda url: _art(text), fetch_social_media=_never,
+                 fetch_page_text=_never, run_claude_social=_boom_claude)
+    item = {"url": "https://example.com/model-down", "text": None}
+    assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "summary-failed"
+    assert 'status: "summary-failed"' in _only_note(tmp_path)
+    [record] = _saved(tmp_path)
+    assert (record["fetch_status"], record["body"]) == ("complete", text)

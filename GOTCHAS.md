@@ -28,3 +28,28 @@
 - **Note delivery:** the machine displaying your vault needs its own verified
   synchronization path. A healthy upstream writer alone does not prove notes
   reached that machine.
+- **Capture extra license:** trafilatura is Apache-2.0 from 1.8.0 on; earlier
+  releases are GPLv3+. Never pin it below 1.8.0.
+- tld is MPL-1.1 OR GPL-2.0-only OR LGPL-2.1-or-later; Keepworthy uses it
+  under MPL-1.1. Other licenses in the extra: pypdf and lxml BSD-3-Clause,
+  certifi MPL-2.0, regex Apache-2.0 AND CNRI-Python, the rest MIT, BSD, or
+  Apache.
+- **Capture lock age gate:** the lock takes only releases at least 14 days
+  old, so the pypdf pin trails upstream. 6.21.4 (2026-10-28, two security
+  fixes) clears the gate on 2026-11-11; bump the pin then and move
+  `--exclude-newer` to 14 days before the regeneration date. Regenerate from
+  the repo root with:
+
+  ```sh
+  { printf '%s\n' '# Optional article and PDF extraction; regenerate with the command in GOTCHAS.md.' '--only-binary=:all:' '--require-hashes'; printf 'trafilatura==2.3.1\npypdf==6.21.1\n' | uv pip compile - --generate-hashes --python-version 3.12 --only-binary :all: --exclude-newer 2026-10-18T00:00:00Z --no-header --no-annotate --quiet; } > requirements-capture.lock
+  ```
+
+- **Article fetches carry no cookies:** `fetch_article` must never use the
+  social cookie jar, `COOKIES_PATH`, or an `Authorization` header. A shared url
+  is untrusted and can point at any host.
+- **Article fetch deadline:** `MAX_FETCH_S` (60 s) bounds a whole fetch on top
+  of the 20 s per-operation `TIMEOUT_S`. Over HTTPS the worst case is about
+  80 s.
+- **Extraction CPU time is unbounded:** the 60 s fetch deadline covers the
+  network read only. HTML parsing and PDF text extraction run after it with no
+  time limit.

@@ -12,6 +12,7 @@ __pycache__/
 .pytest_cache/
 .venv/
 .superpowers/
+.codegraph/
 .draftdaemon/
 *.db
 *.db-shm

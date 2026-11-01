@@ -61,3 +61,19 @@ def test_public_ci_is_valid_yaml_with_pinned_actions_and_no_private_runner_spend
                 assert re.fullmatch(r'[^@]+@[a-f0-9]{40}',step['uses'])
             if 'with' in step and 'persist-credentials' in step['with']:
                 assert step['with']['persist-credentials']=='false'
+
+def test_ci_installs_are_hash_pinned_wheels_and_capture_job_adds_the_extra():
+    import yaml
+    workflow=yaml.load((Path(__file__).parents[1]/'.github/workflows/checks.yml').read_text(),Loader=yaml.BaseLoader)
+    jobs=workflow['jobs']
+    assert {'tests','tests-capture'}<=set(jobs)
+    installs={}
+    for name in ('tests','tests-capture'):
+        runs=[step['run'] for step in jobs[name]['steps'] if 'pip install' in step.get('run','')]
+        assert len(runs)==1, name
+        assert '--require-hashes' in runs[0] and '--only-binary=:all:' in runs[0]
+        assert any(step.get('run','').strip()=='python -m pytest -q' for step in jobs[name]['steps'])
+        installs[name]=runs[0]
+    assert '-r requirements-dev.lock' in installs['tests']
+    assert 'requirements-capture.lock' not in installs['tests']
+    assert '-r requirements-dev.lock -r requirements-capture.lock' in installs['tests-capture']

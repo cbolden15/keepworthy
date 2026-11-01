@@ -9,6 +9,7 @@ from src import config as config_mod
 from src.config import allowed_topics
 from src import media, transcript as transcript_mod, meta as meta_mod, note as note_mod, summarize, state
 from src import social
+from src import article
 from src import open_brain_bridge
 from src import finance_content
 
@@ -28,6 +29,12 @@ def _default_deps(cfg=None):
         build_stub_note=note_mod.build_stub_note,
         write_open_brain_capture=open_brain_bridge.write_youtube_capture,
     )
+
+def _capture_mode_line(mode: dict) -> str:
+    if mode["mode"] == "full":
+        return (f"article capture: full (trafilatura {mode['trafilatura']}, "
+                f"pypdf {mode['pypdf']})")
+    return "article capture: fallback (meta tags only; install requirements-capture.txt)"
 
 def _write_note(cfg, video_meta, content, topic="Other", subtopic="General",
                 processed="") -> Path:
@@ -172,6 +179,7 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     project_root = Path(__file__).resolve().parent.parent
     cfg = config_mod.load_config(project_root / "config.env", environment=os.environ)
+    log.info(_capture_mode_line(article.capture_mode()))
     processed = date.today().isoformat()
     results = run(cfg, project_root, processed, _default_deps(cfg))
     for vid, outcome in results:
