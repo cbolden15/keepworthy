@@ -403,7 +403,7 @@ def _extract_pdf(data: bytes) -> tuple[str, dict, str]:
     try:
         reader = _pypdf.PdfReader(io.BytesIO(data))
     except Exception as e:       # hostile input can raise far outside PyPdfError
-        log.info("pdf unreadable: %s", e)
+        log.info("pdf unreadable: %s", type(e).__name__)
         return "", {}, "unreadable pdf"
     if reader.is_encrypted:
         try:
@@ -418,7 +418,7 @@ def _extract_pdf(data: bytes) -> tuple[str, dict, str]:
         texts = [(pages[i].extract_text() or "").strip() for i in range(min(count, MAX_PDF_PAGES))]
         meta = _pdf_meta(reader)
     except Exception as e:
-        log.info("pdf unreadable: %s", e)
+        log.info("pdf unreadable: %s", type(e).__name__)
         return "", {}, "unreadable pdf"
     text = "\n\n".join(t for t in texts if t)
     return text, meta, "page cap" if count > MAX_PDF_PAGES else ""

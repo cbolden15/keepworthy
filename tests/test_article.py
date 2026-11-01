@@ -395,16 +395,17 @@ def test_deadline_bounds_a_real_trickling_socket(monkeypatch, where):
     client, server = socket.socketpair()
     head = (b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
             b"Content-Length: 100000\r\n\r\n")
+    padded = b"HTTP/1.1 200 OK\r\nX-Pad: " + b"p" * 400 + b"\r\n"   # never ends in 300 bytes
 
     def serve():
         try:
             server.recv(65536)                  # the GET
             if where == "body":
                 server.sendall(head)
-            trickle = head if where == "headers" else b"<html><body>" + b"x" * 100
-            for byte in trickle[:60]:           # at most ~6 s, then go quiet
+            trickle = padded if where == "headers" else b"<html><body>" + b"x" * 400
+            for byte in trickle[:300]:          # at most ~6 s, then go quiet
                 server.sendall(bytes([byte]))
-                time.sleep(0.1)
+                time.sleep(0.02)                # far inside the 0.5 s per-recv timeout
         except OSError:
             pass
 
@@ -661,6 +662,32 @@ def test_pdf_unreadable_is_partial(monkeypatch):
     monkeypatch.setattr(article, "_pypdf", _stub_pypdf(error=ValueError("bad xref")))
     art = FakeNet(FakeResponse(200, PDF, b"%PDF-1.4 junk")).fetch("https://example.com/bad.pdf")
     assert (art["extraction"], art["reason"], art["text"]) == ("partial", "unreadable pdf", "")
+
+
+@pytest.mark.parametrize("where", ["open", "pages"])
+def test_pdf_error_text_stays_out_of_logs(monkeypatch, caplog, where):
+    # exception text can echo PDF bytes; only the exception type is logged
+    leak = ValueError("stream bytes: confidential-marker")
+    if where == "open":
+        monkeypatch.setattr(article, "_pypdf", _stub_pypdf(error=leak))
+    else:
+        class Page:
+            def extract_text(self):
+                raise leak
+        stub = _stub_pypdf()
+        real_reader = stub.PdfReader
+
+        def reader(stream):
+            got = real_reader(stream)
+            got.pages = [Page()]
+            return got
+        monkeypatch.setattr(article, "_pypdf", SimpleNamespace(PdfReader=reader,
+                                                               __version__="0-test"))
+    caplog.set_level("DEBUG", logger=article.log.name)
+    art = FakeNet(FakeResponse(200, PDF, b"%PDF-1.4 junk")).fetch("https://example.com/bad.pdf")
+    assert art["reason"] == "unreadable pdf"
+    assert "ValueError" in caplog.text
+    assert "confidential-marker" not in caplog.text
 
 
 def test_pdf_without_extra_is_partial_fallback(monkeypatch):
