@@ -35,6 +35,8 @@ class Config:
     free_media_enabled: bool = False
     social_batch_size: int = 0
     model_sandbox: bool = False
+    import_db_path: Path = Path("state/import.db")
+    import_daily_limit: int = 20
 
 _DEFAULTS = {
     "SUBFOLDER": "YouTube Summaries",
@@ -60,6 +62,8 @@ _DEFAULTS = {
     "FREE_MEDIA_ENABLED": "false",
     "SOCIAL_BATCH_SIZE": "0",
     "MODEL_SANDBOX": "false",
+    "IMPORT_DB_PATH": "state/import.db",
+    "IMPORT_DAILY_LIMIT": "20",
     "SUBTOPICS": "AI & Dev:Claude Code|AI Agents|Second Brain & Knowledge Systems|"
                  "Self-Hosting & Infrastructure|Dev Tools & Repos;"
                  "Business & Marketing:AI Agencies & Websites|Local Business AI|"
@@ -137,6 +141,14 @@ def load_config(path: Path, environment: Mapping[str, str] | None = None) -> Con
     social_batch_size = int(get("SOCIAL_BATCH_SIZE"))
     if not 0 <= social_batch_size <= 100:
         raise ValueError("SOCIAL_BATCH_SIZE must be between 0 and 100")
+    try:
+        import_daily_limit = int(get("IMPORT_DAILY_LIMIT"))
+    except ValueError:
+        import_daily_limit = -1
+    if not 0 <= import_daily_limit <= 500:
+        raise ValueError("IMPORT_DAILY_LIMIT must be between 0 and 500")
+    if not get("IMPORT_DB_PATH"):
+        raise ValueError("IMPORT_DB_PATH must be a path")
     finance_content = None
     if get("SURE_CONTEXT_CONFIG"):
         if get("MODEL_SANDBOX") != "true":
@@ -181,6 +193,8 @@ def load_config(path: Path, environment: Mapping[str, str] | None = None) -> Con
         free_media_enabled=get("FREE_MEDIA_ENABLED") == "true",
         social_batch_size=social_batch_size,
         model_sandbox=get("MODEL_SANDBOX") == "true",
+        import_db_path=Path(get("IMPORT_DB_PATH")),
+        import_daily_limit=import_daily_limit,
     )
 
 def allowed_topics(cfg: Config) -> list[str]:
