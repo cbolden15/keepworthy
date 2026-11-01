@@ -39,6 +39,12 @@ class FetchError(Exception):
     Retryable."""
 
 
+class NoSuchHost(FetchError):
+    """DNS answered that the host does not exist (EAI_NONAME, EAI_NODATA).
+    A FetchError, so every existing handler keeps treating it as retryable;
+    the processor turns it into a dead link for an imported bookmark."""
+
+
 MIN_WORDS = 150
 TIMEOUT_S = 20
 MAX_FETCH_S = 60
@@ -54,6 +60,8 @@ _PARTIAL_HTTP = frozenset({401, 402, 403})       # read anyway: a teaser is wort
 _SNIFF_BYTES = 512
 _CHUNK = 64 * 1024
 _CGNAT = ipaddress.ip_network("100.64.0.0/10")   # is_private is False for it on 3.12
+# not every platform defines EAI_NODATA; macOS and glibc do
+_NO_SUCH_HOST = frozenset({socket.EAI_NONAME, getattr(socket, "EAI_NODATA", socket.EAI_NONAME)})
 _URL_SAFE = "/%:@!$&'()*+,;=-._~?"
 _CHARSET = re.compile(r"charset\s*=\s*[\"']?([A-Za-z0-9._:-]+)", re.I)
 _HTML_TYPES = frozenset({"text/html", "application/xhtml+xml"})
@@ -125,6 +133,8 @@ def _check_host(host: str, port: int, resolver) -> str:
         try:
             infos = resolver(host, port, type=socket.SOCK_STREAM)
         except (OSError, UnicodeError) as e:
+            if isinstance(e, socket.gaierror) and e.errno in _NO_SUCH_HOST:
+                raise NoSuchHost(f"no such host {host}: {e}") from e
             raise FetchError(f"could not resolve {host}: {e}") from e
         addresses = [ipaddress.ip_address(str(info[4][0]).split("%", 1)[0]) for info in infos]
     if not addresses:
@@ -304,13 +314,16 @@ def capture_mode() -> dict:
             "pypdf": _version(_pypdf, "pypdf")}
 
 
-def fetch_article(url: str, *, resolver=socket.getaddrinfo, connector=None) -> dict | None:
+def fetch_article(url: str, *, resolver=socket.getaddrinfo, connector=None,
+                  log_url: bool = True) -> dict | None:
     """One GET with redirect following. Returns None for an unsupported
     content type (image, archive, audio, anything not HTML or PDF). Raises
     BlockedURL or FetchError. Otherwise returns title, author, date
     (YYYY-MM-DD or ""), site, text, kind ("article"|"pdf"), source_format
     ("html"|"pdf"), extraction ("full"|"partial"), word_count, status and
-    reason ("" when full). "full" always means at least MIN_WORDS words."""
+    reason ("" when full). "full" always means at least MIN_WORDS words.
+    log_url=False keeps the url out of the extraction-failure log line (the
+    processor passes it for imported bookmarks)."""
     got = _fetch(url, resolver, connector or _connect)
     if got.fmt is None:
         if got.status >= 400:
@@ -319,7 +332,8 @@ def fetch_article(url: str, *, resolver=socket.getaddrinfo, connector=None) -> d
     if got.fmt == "pdf":
         text, meta, problem = _extract_pdf(got.data)
     else:
-        text, meta, problem = _extract_html(got.data, got.charset, got.final_url)
+        text, meta, problem = _extract_html(got.data, got.charset, got.final_url,
+                                            log_url=log_url)
     return _result(got, got.fmt, text, meta, _reason(got, problem, text))
 
 
@@ -369,7 +383,8 @@ def _meta_tag_reader(html: str) -> tuple[str, dict]:
     return text, meta
 
 
-def _extract_html(data: bytes, charset: str, url: str) -> tuple[str, dict, str]:
+def _extract_html(data: bytes, charset: str, url: str, *,
+                  log_url: bool = True) -> tuple[str, dict, str]:
     if _trafilatura is None:
         text, meta = _meta_tag_reader(_decode(data, charset))
         return text, meta, "fallback"
@@ -379,7 +394,10 @@ def _extract_html(data: bytes, charset: str, url: str) -> tuple[str, dict, str]:
                                     include_tables=True, favor_recall=True) or ""
         doc = _trafilatura.extract_metadata(data, default_url=url)
     except Exception as e:       # it catches only TypeError/ValueError; hostile HTML raises more
-        log.warning("html extraction failed for %s: %s", url, type(e).__name__)
+        if log_url:
+            log.warning("html extraction failed for %s: %s", url, type(e).__name__)
+        else:
+            log.warning("html extraction failed: %s", type(e).__name__)
         return "", {}, "unreadable html"
     meta = {"title": doc.title, "author": doc.author, "date": doc.date, "site": doc.sitename}
     return text.strip(), meta, ""

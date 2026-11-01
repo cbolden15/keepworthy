@@ -390,17 +390,21 @@ def _article_fields(art: dict) -> dict:
 
 
 def _article_fetch_failed(cfg, item, url, key, shared_text, processed, deps, err, *,
-                          label) -> str:
+                          label, dead=False) -> str:
     """The retry policy of an empty media fetch, without the media tools:
-    yt-dlp against a host that just timed out burns minutes for nothing."""
+    yt-dlp against a host that just timed out burns minutes for nothing.
+    dead: an imported bookmark whose host does not exist ends as dead-link."""
     attempts = state.record_attempt(cfg.state_path, key)
-    log.warning("article fetch failed for %s (attempt %d): %s", label, attempts, err)
+    # an import's error text can name its host or url; log only the type
+    log.warning("article fetch failed for %s (attempt %d): %s", label, attempts,
+                type(err).__name__ if _is_import(item) else err)
     if attempts < cfg.max_attempts:
         return "retry"
     post_meta = _import_post_meta(item, {**_bare_post_meta(url), **_capture_fields(item)})
     _emit_saved_item(cfg, item, post_meta, key, "failed")
     try:
-        return _write_stub(cfg, post_meta, key, "fetch-failed", shared_text, processed, deps)
+        return _write_stub(cfg, post_meta, key, "dead-link" if dead else "fetch-failed",
+                           shared_text, processed, deps)
     except Exception as stub_err:    # still propagates, but the
         raise _CountedFailure(attempts) from stub_err   # attempt is spent
 
@@ -431,7 +435,7 @@ def _emit_saved_item(cfg, item, post_meta, key, fetch_status, *, summary=None,
             return False
         url = item.get("url") if isinstance(item.get("url"), str) else ""
         if not url.startswith("https://"):
-            log.info("no saved item for a non-https url: %.120s", url)
+            log.info("no saved item for a non-https url: %.120s", key if _is_import(item) else url)
             return False
         platform = post_meta.get("platform")
         open_brain_bridge.write_saved_item(
@@ -505,14 +509,22 @@ def process_social_item(cfg, project_root, item, processed, deps, key, prompt_te
     art = None
     if platform == "generic":
         try:
-            art = deps.fetch_article(url)
+            art = (deps.fetch_article(url, log_url=False) if _is_import(item)
+                   else deps.fetch_article(url))
         except article.BlockedURL as e:
             log.warning("refused %s: %s", label, e)
             return _write_stub(cfg, {**_bare_post_meta(url), **_capture_fields(item)}, key,
                                "invalid", shared_text, processed, deps, reason=_REFUSED_REASON)
         except article.FetchError as e:
-            return _article_fetch_failed(cfg, item, url, key, shared_text, processed, deps, e,
-                                         label=label)
+            return _article_fetch_failed(
+                cfg, item, url, key, shared_text, processed, deps, e, label=label,
+                dead=_is_import(item) and isinstance(e, article.NoSuchHost))
+    if _is_import(item) and art is not None and art.get("status") in (404, 410):
+        # the host answered and the page is gone: one GET settles it, with no
+        # attempt recorded and no media tools (yt-dlp could spend minutes here)
+        post_meta = _import_post_meta(item, {**_bare_post_meta(url), **_capture_fields(item)})
+        _emit_saved_item(cfg, item, post_meta, key, "failed")
+        return _write_stub(cfg, post_meta, key, "dead-link", shared_text, processed, deps)
     # A capped read (HTML over the size cap, PDF over the page cap) with
     # enough words is summarized from the text that was read.
     text_path = art is not None and (art["extraction"] == "full" or (
@@ -735,6 +747,8 @@ def drain_social_queue(cfg, project_root, processed, deps=None) -> list:
             log.error("unexpected error on %s (attempt %d): %s", label, attempts, e)
             if attempts >= cfg.max_attempts:
                 bare = _bare_post_meta(url)
+                if _is_import(item):     # the same capture fields and fallbacks as other import stubs
+                    bare = _import_post_meta(item, {**bare, **_capture_fields(item)})
                 _emit_saved_item(cfg, item, bare, key, "failed")
                 outcome = _write_stub(cfg, bare, key, "summary-failed",
                                       item.get("text"), processed, deps)

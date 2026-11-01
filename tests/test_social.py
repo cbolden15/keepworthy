@@ -1560,3 +1560,174 @@ def test_poll_log_line_unchanged_for_shares(tmp_path, monkeypatch, caplog):
     with caplog.at_level(logging.INFO, logger="yt-obsidian"):
         poll.main()
     assert "social https://example.org/a → summarized" in caplog.messages
+
+
+# ---- dead links for imported bookmarks -------------------------------------------
+
+def _gone(status):
+    return _art("", "partial", f"http {status}", status=status, title="", author="",
+                date="", site="example.com")
+
+
+def _dead_link_deps(fetch_article):
+    return _deps(fetch_article=fetch_article, fetch_social_media=_never,
+                 fetch_page_text=_never, run_claude_social=_never)
+
+
+def test_import_404_is_dead_link_at_once_without_media_or_model(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    monkeypatch.setattr(social.state, "record_attempt", _never)
+    item = _import_item()
+    key = url_key(item["url"])
+    deps = _dead_link_deps(lambda url, **kw: _gone(404))
+    assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "dead-link"
+    loaded = state_mod.load_state(cfg.state_path)
+    assert key not in loaded["attempts"] and state_mod.is_seen(loaded, key)
+    note = _only_note(tmp_path)
+    fm = note.split("---")[1]
+    assert 'status: "dead-link"' in fm and 'capture_source: "import"' in fm
+    assert 'title: "Bookmark title"' in fm and 'date: "2024-03-09"' in fm
+    assert 'tags: ["generic", "Reading", "Infra", "python", "second-brain"]' in fm
+    assert ("This link is gone (http 404/410 or the host no longer exists); "
+            "saved for reference.") in note
+    assert "Original: https://example.com/bookmark" in note
+
+
+def test_import_410_is_dead_link_at_once(tmp_path):
+    cfg = _cfg(tmp_path)
+    deps = _dead_link_deps(lambda url, **kw: _gone(410))
+    assert _process(cfg, tmp_path, _import_item(), "2026-11-01", deps) == "dead-link"
+    assert 'status: "dead-link"' in _frontmatter(tmp_path)
+
+
+def test_import_no_such_host_retries_then_dead_link(tmp_path):
+    cfg = _cfg(tmp_path, MAX_ATTEMPTS=3)
+
+    def missing(url, **kw):
+        raise article.NoSuchHost("no such host")
+    item = _import_item()
+    key = url_key(item["url"])
+    deps = _dead_link_deps(missing)
+    assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "retry"
+    assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "retry"
+    assert state_mod.load_state(cfg.state_path)["attempts"][key] == 2
+    assert not (tmp_path / "vault").exists()
+    assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "dead-link"
+    fm = _frontmatter(tmp_path)
+    assert 'status: "dead-link"' in fm and 'title: "Bookmark title"' in fm
+
+
+def test_import_other_resolver_error_is_fetch_failed(tmp_path):
+    cfg = _cfg(tmp_path, MAX_ATTEMPTS=1)
+
+    def unresolved(url, **kw):
+        raise article.FetchError("could not resolve: temporary failure")
+    deps = _dead_link_deps(unresolved)
+    assert _process(cfg, tmp_path, _import_item(), "2026-11-01", deps) == "fetch-failed"
+    assert 'status: "fetch-failed"' in _frontmatter(tmp_path)
+
+
+def test_live_share_404_is_still_partial(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    monkeypatch.setattr(social.state, "record_attempt", _never)
+    deps = _deps(fetch_article=lambda url: _gone(404), fetch_social_media=_no_media,
+                 run_claude_social=_never)
+    item = {"url": "https://example.com/bookmark", "text": None}
+    assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "partial"
+    note = _only_note(tmp_path)
+    assert 'status: "partial"' in note and "Only part of this page could be fetched (http 404)" in note
+
+
+def test_live_share_no_such_host_is_still_fetch_failed(tmp_path):
+    cfg = _cfg(tmp_path)                          # MAX_ATTEMPTS=2
+
+    def missing(url):
+        raise article.NoSuchHost("no such host")
+    deps = _deps(fetch_article=missing, fetch_social_media=_never, fetch_page_text=_never)
+    item = {"url": "https://example.com/bookmark", "text": None}
+    assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "retry"
+    assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "fetch-failed"
+    assert 'status: "fetch-failed"' in _frontmatter(tmp_path)
+
+
+def test_no_import_url_in_logs(tmp_path, monkeypatch, caplog):
+    from types import SimpleNamespace
+    from src import poll
+    from tests.test_article import FakeNet, _html
+    cfg = _cfg(tmp_path, MAX_ATTEMPTS=2, IMPORT_DB_PATH=f"{tmp_path}/import.db",
+               OPEN_BRAIN_SAVED_SPOOL_DIR=f"{tmp_path}/saved")
+    urls = {"gone": "http://example.com/gone", "missing": "https://missing.example.com/a",
+            "down": "https://example.com/down", "unreadable": "https://example.com/unreadable",
+            "fine": "https://example.com/fine"}
+
+    def broken_extractor(*args, **kwargs):
+        raise RuntimeError(f"cannot parse {urls['unreadable']}")
+    # the real fetch_article with a fake network and an extractor that throws
+    monkeypatch.setattr(article, "_trafilatura",
+                        SimpleNamespace(extract=broken_extractor, extract_metadata=broken_extractor))
+
+    def fetch(url, **kw):
+        if url == urls["gone"]:
+            return _gone(404)
+        if url == urls["missing"]:
+            raise article.NoSuchHost(f"no such host missing.example.com: {url}")
+        if url == urls["down"]:
+            raise article.FetchError(f"fetch failed for example.com: timed out reading {url}")
+        if url == urls["unreadable"]:
+            net = FakeNet(_html())
+            return article.fetch_article(url, resolver=net.resolver, connector=net.connector, **kw)
+        return _art(_LONG_TEXT)
+    deps = _deps(fetch_article=fetch, fetch_social_media=_no_media,
+                 fetch_page_text=lambda url, ck: {"title": "", "text": "", "author": ""})
+    state_mod.record_attempt(cfg.state_path, url_key(urls["down"]))   # this run is its last
+    for url in urls.values():
+        append_item(cfg.queue_path, _import_item(url))
+    monkeypatch.setattr(poll.config_mod, "load_config", lambda path, environment=None: cfg)
+    monkeypatch.setattr(poll, "run", lambda cfg, root, processed, deps: [])
+    monkeypatch.setattr(social, "_default_deps", lambda cfg=None: deps)
+    with caplog.at_level(logging.DEBUG, logger="yt-obsidian"):
+        poll.main()
+    messages = [record.getMessage() for record in caplog.records]
+    assert [m for m in messages if "example.com" in m] == []
+    keys = {name: url_key(url) for name, url in urls.items()}
+    assert f"article fetch failed for {keys['missing']} (attempt 1): NoSuchHost" in messages
+    assert f"article fetch failed for {keys['down']} (attempt 2): FetchError" in messages
+    assert f"no saved item for a non-https url: {keys['gone']}" in messages
+    assert "html extraction failed: RuntimeError" in messages
+    per_item = [m for m in messages if m.startswith(
+        ("social ", "article fetch failed for ", "no saved item for "))]
+    assert len(per_item) == 8                     # five result lines, two failures, one saved item
+    assert all("url:" in m for m in per_item)
+    assert sorted(m.rsplit(" → ", 1)[1] for m in per_item if m.startswith("social ")) == \
+        ["dead-link", "fetch-failed", "partial", "retry", "summarized"]
+
+
+def test_share_failure_log_lines_unchanged(tmp_path, caplog):
+    cfg = _cfg(tmp_path, MAX_ATTEMPTS=1, OPEN_BRAIN_SAVED_SPOOL_DIR=f"{tmp_path}/saved")
+    url = "http://example.com/down"
+
+    def down(url):
+        raise article.FetchError("fetch failed for example.com: timed out")
+    deps = _deps(fetch_article=down, fetch_social_media=_never, fetch_page_text=_never)
+    with caplog.at_level(logging.DEBUG, logger="yt-obsidian"):
+        assert _process(cfg, tmp_path, {"url": url, "text": None}, "2026-11-01", deps) == \
+            "fetch-failed"
+    assert caplog.messages == [
+        "article fetch failed for http://example.com/down (attempt 1): "
+        "fetch failed for example.com: timed out",
+        "no saved item for a non-https url: http://example.com/down"]
+
+
+def test_import_unexpected_error_stub_carries_bookmark_fields(tmp_path):
+    cfg = _cfg(tmp_path, MAX_ATTEMPTS=1)
+
+    def crash(url, **kw):
+        raise RuntimeError("extractor bug")
+    append_item(cfg.queue_path, _import_item())
+    results = drain_social_queue(cfg, tmp_path, "2026-11-01", deps=_deps(fetch_article=crash))
+    assert results == [(url_key("https://example.com/bookmark"), "summary-failed")]
+    fm = _frontmatter(tmp_path)
+    assert 'status: "summary-failed"' in fm and 'capture_source: "import"' in fm
+    assert 'capture_why: "Imported from Pocket. Tags: python."' in fm
+    assert 'title: "Bookmark title"' in fm and 'date: "2024-03-09"' in fm
+    assert 'tags: ["generic", "Reading", "Infra", "python", "second-brain"]' in fm

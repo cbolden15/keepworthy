@@ -720,3 +720,38 @@ def test_capture_mode_falls_back_when_either_import_is_missing(monkeypatch):
     assert article.capture_mode() == {"mode": "fallback", "trafilatura": "0-test", "pypdf": None}
     monkeypatch.setattr(article, "_pypdf", _stub_pypdf())
     assert article.capture_mode() == {"mode": "full", "trafilatura": "0-test", "pypdf": "0-test"}
+
+
+@pytest.mark.parametrize("errno", sorted({socket.EAI_NONAME,
+                                          getattr(socket, "EAI_NODATA", socket.EAI_NONAME)}))
+def test_missing_host_raises_no_such_host(errno):
+    def resolver(host, port, *args, **kwargs):
+        raise socket.gaierror(errno, "nodename nor servname provided, or not known")
+    with pytest.raises(article.NoSuchHost) as err:
+        article._fetch("https://example.com/", resolver, FakeNet().connector)
+    assert isinstance(err.value, FetchError)
+
+
+@pytest.mark.parametrize("error", [socket.gaierror(socket.EAI_AGAIN, "temporary failure"),
+                                   OSError("network is unreachable")])
+def test_other_resolver_errors_stay_plain_fetch_error(error):
+    def resolver(host, port, *args, **kwargs):
+        raise error
+    with pytest.raises(FetchError) as err:
+        article._fetch("https://example.com/", resolver, FakeNet().connector)
+    assert not isinstance(err.value, article.NoSuchHost)
+
+
+def test_extraction_failure_log_can_leave_out_the_url(monkeypatch, caplog):
+    def broken(*args, **kwargs):
+        raise RuntimeError("bad markup")
+    monkeypatch.setattr(article, "_trafilatura", SimpleNamespace(extract=broken,
+                                                                 extract_metadata=broken))
+    with caplog.at_level("WARNING", logger="yt-obsidian"):
+        shared = FakeNet(_html()).fetch("https://example.com/shared")
+        net = FakeNet(_html())
+        imported = article.fetch_article("https://example.com/imported", resolver=net.resolver,
+                                         connector=net.connector, log_url=False)
+    assert shared["reason"] == imported["reason"] == "unreadable html"
+    assert caplog.messages == ["html extraction failed for https://example.com/shared: RuntimeError",
+                               "html extraction failed: RuntimeError"]

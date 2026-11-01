@@ -711,3 +711,13 @@ def test_social_frontmatter_tags_unchanged_without_import_tags():
                             "body", None, "2026-11-01")
     assert 'tags: ["generic", "python"]' in out
     assert "import_tags" not in out
+
+
+def test_stub_note_dead_link_reason():
+    pm = {"platform": "generic", "url": "https://example.com/gone", "kind": "text",
+          "title": "Bookmark title", "capture_source": "import"}
+    out = build_social_stub_note(pm, "dead-link", None, "2026-11-01")
+    assert 'status: "dead-link"' in out
+    assert ("This link is gone (http 404/410 or the host no longer exists); "
+            "saved for reference.") in out
+    assert "Not summarized." not in out
