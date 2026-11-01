@@ -175,3 +175,64 @@ def test_csv_field_size_limit_applied(tmp_path):
     with pytest.raises(ParseError) as err:
         pocket.parse(path)
     assert "line 3" in str(err.value)
+
+
+def test_netscape_deep_nesting_is_capped_and_fast(tmp_path):
+    import time
+    depth, count = 5000, 1000
+    opening = "<DL><p>\n<DT><H3>a</H3>\n" * depth
+    anchors = "".join(f'<DT><A HREF="https://example.com/{i}">n{i}</A>\n' for i in range(count))
+    path = tmp_path / "deep.html"
+    path.write_text(f"<!DOCTYPE NETSCAPE-Bookmark-file-1>\n{opening}{anchors}{'</DL>' * depth}\n")
+    started = time.monotonic()
+    result = netscape.parse(path)
+    assert time.monotonic() - started < 2
+    assert len(result.bookmarks) == count and result.bad_rows == 0
+    assert importers.MAX_FOLDER_DEPTH == 64
+    expected = "/".join(["a"] * (importers.MAX_FOLDER_DEPTH - 1))   # the root <DL> is unnamed
+    assert all(b.folder == expected and len(b.folder) <= importers.MAX_FOLDER
+               for b in result.bookmarks)
+
+
+def test_netscape_folders_below_the_cap_are_unchanged_after_deep_close(tmp_path):
+    path = tmp_path / "close.html"
+    deep = "<DL><p>\n<DT><H3>a</H3>\n" * (importers.MAX_FOLDER_DEPTH + 5)
+    path.write_text("<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<DL><p>\n<DT><H3>top</H3>\n<DL><p>\n"
+                    f"{deep}{'</DL>' * (importers.MAX_FOLDER_DEPTH + 5)}\n"
+                    '<DT><A HREF="https://example.com/x">x</A>\n</DL>\n</DL>\n')
+    assert netscape.parse(path).bookmarks[0].folder == "top"
+
+
+@pytest.mark.parametrize("url", ["https://", "http:foo", "https:///path",
+                                 "https://example.com/" + "a" * importers.MAX_URL],
+                         ids=["no-host", "no-slashes", "empty-authority", "too-long"])
+def test_collector_counts_hostless_and_oversized_urls_as_bad(url):
+    collector = importers.Collector("netscape", 10)
+    collector.add(url)
+    result = collector.result()
+    assert (result.found, result.bad_rows, result.unsupported_scheme) == (1, 1, 0)
+    assert result.bookmarks == []
+
+
+def test_collector_accepts_url_at_the_length_cap():
+    url = "https://example.com/" + "a" * (importers.MAX_URL - len("https://example.com/"))
+    collector = importers.Collector("netscape", 10)
+    collector.add(url)
+    assert collector.result().bookmarks[0].url == url
+
+
+def test_netscape_unclosed_anchor_before_next_anchor_is_counted(tmp_path):
+    path = tmp_path / "open.html"
+    path.write_text('<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<DL><p>\n<DT><A HREF="https://example.com/1">one\n'
+                    '<DT><A HREF="https://example.com/2">two</A>\n</DL>\n')
+    result = netscape.parse(path)
+    assert [b.url for b in result.bookmarks] == ["https://example.com/2"]
+    assert (result.found, result.bad_rows) == (2, 1)
+
+
+def test_sanitize_strips_bidi_and_zero_width_characters():
+    assert sanitize_text("a‮b‪c⁦d⁩e​f‏g﻿h", 50) == "abcdefgh"
+
+
+def test_sanitize_has_no_trailing_space_after_cut():
+    assert sanitize_text("a" * 299 + " b", 300) == "a" * 299

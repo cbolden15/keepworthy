@@ -4,7 +4,8 @@ reads another file."""
 import codecs
 from html.parser import HTMLParser
 
-from src.importers import MAX_BOOKMARKS, MAX_FOLDER, Collector, ParseResult, sanitize_text
+from src.importers import (MAX_BOOKMARKS, MAX_FOLDER, MAX_FOLDER_DEPTH, Collector, ParseResult,
+                           sanitize_text)
 
 _CHUNK = 1024 * 1024
 
@@ -21,7 +22,8 @@ class _BookmarkParser(HTMLParser):
     def __init__(self, collector: Collector):
         super().__init__(convert_charrefs=True)
         self.collector = collector
-        self.stack: list[str] = []      # folder names of the open <DL>s
+        self.stack: list[str] = []      # folder names of the open <DL>s, at most MAX_FOLDER_DEPTH
+        self.deeper = 0                 # open <DL>s past MAX_FOLDER_DEPTH; their names are ignored
         self.pending = ""               # the last completed <H3> name
         self.h3: list[str] | None = None
         self.anchor: dict | None = None
@@ -31,9 +33,14 @@ class _BookmarkParser(HTMLParser):
         if tag == "h3":
             self.h3 = []
         elif tag == "dl":
-            self.stack.append(self.pending)     # "" for the root <DL> after <H1>
+            if len(self.stack) < MAX_FOLDER_DEPTH:
+                self.stack.append(self.pending)     # "" for the root <DL> after <H1>
+            else:
+                self.deeper += 1
             self.pending = ""
         elif tag == "a":
+            if self.anchor is not None:         # the previous <A> never closed
+                self.collector.bad()
             self.anchor = dict(attrs)           # names arrive lower-cased
             self.title = []
 
@@ -42,7 +49,9 @@ class _BookmarkParser(HTMLParser):
             self.pending = sanitize_text("".join(self.h3), MAX_FOLDER)
             self.h3 = None
         elif tag == "dl":
-            if self.stack:                      # a stray </DL> in a malformed tail
+            if self.deeper:
+                self.deeper -= 1
+            elif self.stack:                    # a stray </DL> in a malformed tail
                 self.stack.pop()
         elif tag == "a" and self.anchor is not None:
             attrs, self.anchor = self.anchor, None

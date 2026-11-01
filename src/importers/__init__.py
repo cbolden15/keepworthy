@@ -16,6 +16,8 @@ MAX_FILE_BYTES = 50 * 1024 * 1024
 MAX_BOOKMARKS = 50_000
 MAX_TITLE = 300
 MAX_FOLDER = 200
+MAX_FOLDER_DEPTH = 64               # nested folders tracked; deeper names are ignored
+MAX_URL = 4096
 MAX_TAGS = 20
 MAX_TAG = 50
 MAX_NOTE = 280                      # a Raindrop note becomes the item's why
@@ -24,7 +26,8 @@ SNIFF_BYTES = 64 * 1024
 SOURCES = ("netscape", "pocket", "raindrop")   # sniff order and --format choices
 SOURCE_LABELS = {"netscape": "browser bookmarks", "pocket": "Pocket", "raindrop": "Raindrop"}
 
-_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+# C0, DEL, C1, then zero-width marks and bidi overrides (reorder how a title prints)
+_CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
 _SPACE = re.compile(r"\s+")
 _DIGITS = re.compile(r"[0-9]+")
 _EARLIEST = datetime(1990, 1, 1, tzinfo=timezone.utc)
@@ -65,7 +68,7 @@ def sanitize_text(value: str, limit: int) -> str:
     tab) become a space first, so a multi-line note reads as one line."""
     text = _SPACE.sub(" ", str(value or ""))
     text = _SPACE.sub(" ", _CONTROL.sub("", text)).strip()
-    return text[:limit]
+    return text[:limit].rstrip()
 
 
 def sanitize_tags(values) -> tuple[str, ...]:
@@ -123,9 +126,16 @@ class Collector:
         if not url:
             self.bad()
             return
+        if len(url) > MAX_URL:
+            self.bad()
+            return
         try:
-            scheme = urlsplit(url).scheme.lower()
+            parts = urlsplit(url)
         except ValueError:
+            self.bad()
+            return
+        scheme = parts.scheme.lower()
+        if scheme in ("http", "https") and not parts.netloc:
             self.bad()
             return
         self.found += 1
