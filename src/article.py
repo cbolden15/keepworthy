@@ -374,11 +374,14 @@ def _extract_html(data: bytes, charset: str, url: str) -> tuple[str, dict, str]:
         text, meta = _meta_tag_reader(_decode(data, charset))
         return text, meta, "fallback"
     # raw bytes: trafilatura does its own charset detection
-    text = _trafilatura.extract(data, url=url, output_format="txt", include_comments=False,
-                                include_tables=True, favor_recall=True) or ""
-    doc = _trafilatura.extract_metadata(data, default_url=url)
-    meta = {} if doc is None else {"title": doc.title, "author": doc.author,
-                                   "date": doc.date, "site": doc.sitename}
+    try:
+        text = _trafilatura.extract(data, url=url, output_format="txt", include_comments=False,
+                                    include_tables=True, favor_recall=True) or ""
+        doc = _trafilatura.extract_metadata(data, default_url=url)
+    except Exception as e:       # it catches only TypeError/ValueError; hostile HTML raises more
+        log.warning("html extraction failed for %s: %s", url, type(e).__name__)
+        return "", {}, "unreadable html"
+    meta = {"title": doc.title, "author": doc.author, "date": doc.date, "site": doc.sitename}
     return text.strip(), meta, ""
 
 

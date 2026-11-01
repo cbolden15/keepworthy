@@ -493,6 +493,22 @@ def test_fetch_article_404_is_partial_without_text():
     assert art["site"] == "example.com" and art["word_count"] == 0
 
 
+@pytest.mark.parametrize("error", [RuntimeError("lxml blew up"), RecursionError("deep")])
+@pytest.mark.parametrize("failing", ["extract", "extract_metadata"])
+def test_fetch_article_html_extractor_error_is_partial(monkeypatch, caplog, error, failing):
+    def boom(*args, **kwargs):
+        raise error
+    stub = SimpleNamespace(extract=_StubTrafilatura.extract,
+                           extract_metadata=_StubTrafilatura.extract_metadata)
+    setattr(stub, failing, boom)
+    monkeypatch.setattr(article, "_trafilatura", stub)
+    art = FakeNet(_html(_fixture("article-long.html"))).fetch("https://example.com/notebook")
+    assert (art["extraction"], art["reason"], art["text"]) == ("partial", "unreadable html", "")
+    assert (art["kind"], art["source_format"], art["status"]) == ("article", "html", 200)
+    assert "https://example.com/notebook" in caplog.text
+    assert "acid-free" not in caplog.text
+
+
 def test_fetch_article_fallback_without_extra(monkeypatch):
     monkeypatch.setattr(article, "_trafilatura", None)
     art = FakeNet(_html(_fixture("article-long.html"))).fetch("https://example.com/notebook")
