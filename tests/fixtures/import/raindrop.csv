@@ -1,0 +1,6 @@
+id,title,note,excerpt,url,folder,tags,created,cover,highlights,favorite
+101,Paper one,"First line of a note
+second line",An excerpt,https://example.com/paper,Parent/Child,"ml, papers",2024-03-09T12:34:56.000Z,,,false
+102,Highlighted page,,Short excerpt,https://example.org/highlighted,Papers,,2024-02-01T08:00:00.000Z,,"Highlight: a quoted line",true
+103,No folder,,,https://example.com/plain,,,2023-12-31T23:59:59.000Z,,,false
+104,Undated,,,https://example.org/undated,Unsorted,reading,,,,false
