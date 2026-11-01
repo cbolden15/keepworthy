@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Sure context response v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "request_id", "content_id", "scope_id", "snapshot", "accounts", "matches", "issues"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "request_id": {"type": "string", "format": "uuid"},
+    "content_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "scope_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "snapshot": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "status", "fetched_at", "cache_expires_at", "freshness"],
+      "properties": {
+        "id": {"$ref": "#/$defs/nullable_uuid"},
+        "status": {"enum": ["available", "partial", "unavailable"]},
+        "fetched_at": {"type": "string", "format": "date-time"},
+        "cache_expires_at": {"type": "string", "format": "date-time"},
+        "freshness": {
+          "type": "object", "additionalProperties": false,
+          "required": ["state", "oldest_source_sync_at", "max_source_age_seconds"],
+          "properties": {
+            "state": {"enum": ["fresh", "stale", "unverified"]},
+            "oldest_source_sync_at": {"type": ["string", "null"], "format": "date-time"},
+            "max_source_age_seconds": {"type": "integer", "minimum": 3600, "maximum": 172800}
+          },
+          "allOf": [{
+            "if": {"properties": {"state": {"enum": ["fresh", "stale"]}}},
+            "then": {"properties": {"oldest_source_sync_at": {"type": "string", "format": "date-time"}}}
+          }]
+        }
+      },
+      "allOf": [{
+        "if": {"properties": {"status": {"const": "unavailable"}}},
+        "then": {"properties": {"id": {"type": "null"}, "freshness": {"properties": {"state": {"const": "unverified"}}}}},
+        "else": {"properties": {"id": {"type": "string", "format": "uuid"}}}
+      }]
+    },
+    "accounts": {
+      "type": "array", "maxItems": 2000,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "type", "subtype"],
+        "properties": {
+          "id": {"type": "string", "format": "uuid"},
+          "type": {"enum": ["depository", "investment", "crypto", "credit_card", "loan", "other"]},
+          "subtype": {"type": ["string", "null"], "maxLength": 128}
+        }
+      }
+    },
+    "matches": {"type": "array", "maxItems": 50, "items": {"$ref": "#/$defs/match"}},
+    "issues": {
+      "type": "array", "maxItems": 100,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["code", "retryable"],
+        "properties": {
+          "code": {"enum": ["auth_failed", "scope_denied", "scope_mismatch", "network_error", "timeout", "rate_limited", "invalid_response", "pagination_limit", "changing_snapshot", "freshness_unverified", "stale_source", "ambiguous_entity", "unresolved_entity", "missing_security_metadata"]},
+          "retryable": {"type": "boolean"}
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"snapshot": {"anyOf": [
+        {"properties": {"status": {"enum": ["partial", "unavailable"]}}},
+        {"properties": {"freshness": {"properties": {"state": {"enum": ["stale", "unverified"]}}}}}
+      ]}}},
+      "then": {"properties": {"matches": {"items": {"properties": {"ownership": {"properties": {"current_state": {"const": "unknown"}}}}}}}}
+    },
+    {
+      "if": {"properties": {"snapshot": {"properties": {"status": {"const": "unavailable"}}}}},
+      "then": {"properties": {"accounts": {"maxItems": 0}, "issues": {"minItems": 1}, "matches": {"items": {"properties": {"ownership": {"properties": {"observation": {"const": "unknown"}, "record_refs": {"maxItems": 0}}}}}}}}
+    }
+  ],
+  "$defs": {
+    "nullable_uuid": {"type": ["string", "null"], "format": "uuid"},
+    "record_ref": {
+      "type": "object", "additionalProperties": false,
+      "required": ["resource", "id"],
+      "properties": {
+        "resource": {"enum": ["account", "holding"]},
+        "id": {"type": "string", "format": "uuid"}
+      }
+    },
+    "match": {
+      "type": "object", "additionalProperties": false,
+      "required": ["entity_id", "identity", "ownership"],
+      "properties": {
+        "entity_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "identity": {
+          "type": "object", "additionalProperties": false,
+          "required": ["state", "sure_security_id", "ticker", "kind", "exchange_mic", "country_code"],
+          "properties": {
+            "state": {"enum": ["resolved", "ambiguous", "unresolved", "no_sure_record"]},
+            "sure_security_id": {"$ref": "#/$defs/nullable_uuid"},
+            "ticker": {"type": ["string", "null"], "maxLength": 64},
+            "kind": {"enum": ["equity", "etf", "fund", "crypto", "option", "bond", "other", "unknown"]},
+            "exchange_mic": {"type": ["string", "null"], "pattern": "^[A-Z0-9]{4}$"},
+            "country_code": {"type": ["string", "null"], "pattern": "^[A-Z]{2}$"}
+          },
+          "allOf": [{
+            "if": {"properties": {"state": {"const": "resolved"}}},
+            "then": {"properties": {"sure_security_id": {"type": "string", "format": "uuid"}, "ticker": {"type": "string", "minLength": 1}}},
+            "else": {"properties": {"sure_security_id": {"type": "null"}}}
+          }]
+        },
+        "ownership": {
+          "type": "object", "additionalProperties": false,
+          "required": ["current_state", "observation", "observation_date", "record_refs"],
+          "properties": {
+            "current_state": {"enum": ["held", "not_held", "unknown"]},
+            "observation": {"enum": ["positive_position", "zero_position", "no_position", "unknown"]},
+            "observation_date": {"type": ["string", "null"], "format": "date"},
+            "record_refs": {"type": "array", "maxItems": 2000, "uniqueItems": true, "items": {"$ref": "#/$defs/record_ref"}}
+          },
+          "allOf": [
+            {"if": {"properties": {"current_state": {"const": "held"}}}, "then": {"properties": {"observation": {"const": "positive_position"}, "record_refs": {"minItems": 1}}}},
+            {"if": {"properties": {"current_state": {"const": "not_held"}}}, "then": {"properties": {"observation": {"enum": ["zero_position", "no_position"]}}}},
+            {"if": {"properties": {"observation": {"enum": ["positive_position", "zero_position"]}}}, "then": {"properties": {"observation_date": {"type": "string", "format": "date"}, "record_refs": {"minItems": 2, "allOf": [{"contains": {"properties": {"resource": {"const": "holding"}}}}, {"contains": {"properties": {"resource": {"const": "account"}}}}]}}}},
+            {"if": {"properties": {"observation": {"enum": ["no_position", "unknown"]}}}, "then": {"properties": {"observation_date": {"type": "null"}}}}
+          ]
+        }
+      },
+      "allOf": [{
+        "if": {"properties": {"identity": {"properties": {"state": {"enum": ["ambiguous", "unresolved", "no_sure_record"]}}}}},
+        "then": {"properties": {"ownership": {"properties": {"current_state": {"const": "unknown"}, "observation": {"const": "unknown"}, "record_refs": {"maxItems": 0}}}}}
+      }]
+    }
+  }
+}

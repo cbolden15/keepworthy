@@ -1,0 +1,17 @@
+{
+  "prompt_version": 1,
+  "image": "media-visual-eval.jpg",
+  "image_sha256": "d7efbabb75eed009754057938292f088a049ecd59ef2c47507bad64896035e30",
+  "expected_text": [
+    "2 tbsp",
+    "15 minutes"
+  ],
+  "live_result": {
+    "images": 1,
+    "quantity_exact": true,
+    "time_exact": true
+  },
+  "verification_date": "2026-10-31",
+  "model": "sonnet",
+  "execution": "existing isolated subscription launcher"
+}

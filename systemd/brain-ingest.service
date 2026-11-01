@@ -1,0 +1,15 @@
+[Unit]
+Description=Optional authenticated saved-content share endpoint
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Projects/keepworthy
+ExecStart=/usr/bin/python3 -m src.ingest_server
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+UMask=0077
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

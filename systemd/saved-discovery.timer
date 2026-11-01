@@ -1,0 +1,11 @@
+[Unit]
+Description=Discover saved posts daily at 06:00 UTC
+
+[Timer]
+OnCalendar=*-*-* 06:00:00 UTC
+Persistent=true
+RandomizedDelaySec=5min
+Unit=saved-discovery.service
+
+[Install]
+WantedBy=timers.target

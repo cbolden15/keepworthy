@@ -1,0 +1,19 @@
+filters:
+  and:
+    - file.inFolder("saved-content")
+views:
+  - type: table
+    name: All content
+    order:
+      - file.name
+      - platform
+      - source_type
+      - content_kind
+      - topic
+      - subtopic
+      - channel
+      - published
+      - duration
+    sort:
+      - property: processed
+        direction: DESC

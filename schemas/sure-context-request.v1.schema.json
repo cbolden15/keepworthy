@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Sure context request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "request_id", "content_id", "entities"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "request_id": {"type": "string", "format": "uuid"},
+    "content_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "entities": {
+      "type": "array", "maxItems": 50,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["entity_id"],
+        "anyOf": [{"required": ["sure_security_id"]}, {"required": ["ticker"]}, {"required": ["name"]}],
+        "properties": {
+          "entity_id": {"type": "string", "minLength": 1, "maxLength": 128},
+          "sure_security_id": {"type": "string", "format": "uuid"},
+          "ticker": {"type": "string", "minLength": 1, "maxLength": 64},
+          "name": {"type": "string", "minLength": 1, "maxLength": 256},
+          "kind": {"enum": ["equity", "etf", "fund", "crypto", "option", "bond", "other", "unknown"]},
+          "exchange_mic": {"type": "string", "pattern": "^[A-Z0-9]{4}$"},
+          "country_code": {"type": "string", "pattern": "^[A-Z]{2}$"}
+        }
+      }
+    }
+  }
+}

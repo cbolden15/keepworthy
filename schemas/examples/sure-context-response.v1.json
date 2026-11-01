@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "request_id": "11111111-1111-4111-8111-111111111111",
+  "content_id": "synthetic-post-1",
+  "scope_id": "synthetic-sure-owner-scope",
+  "snapshot": {
+    "id": "22222222-2222-4222-8222-222222222222",
+    "status": "available",
+    "fetched_at": "2026-10-31T21:55:00Z",
+    "cache_expires_at": "2026-10-31T22:55:00Z",
+    "freshness": {
+      "state": "unverified", "oldest_source_sync_at": null,
+      "max_source_age_seconds": 129600
+    }
+  },
+  "accounts": [{
+    "id": "33333333-3333-4333-8333-333333333333",
+    "type": "investment", "subtype": "brokerage"
+  }],
+  "matches": [{
+    "entity_id": "company-1",
+    "identity": {
+      "state": "resolved",
+      "sure_security_id": "44444444-4444-4444-8444-444444444444",
+      "ticker": "EXM", "kind": "equity", "exchange_mic": "XNAS", "country_code": "US"
+    },
+    "ownership": {
+      "current_state": "unknown", "observation": "positive_position",
+      "observation_date": "2026-10-31",
+      "record_refs": [
+        {"resource": "account", "id": "33333333-3333-4333-8333-333333333333"},
+        {"resource": "holding", "id": "55555555-5555-4555-8555-555555555555"}
+      ]
+    }
+  }],
+  "issues": [{"code": "freshness_unverified", "retryable": false}]
+}

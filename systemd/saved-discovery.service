@@ -1,0 +1,15 @@
+[Unit]
+Description=Discover saved Instagram, Facebook, and Threads posts
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Projects/keepworthy
+ExecStart=/usr/bin/python3 -m src.saved_discovery --config %h/.config/youtube-obsidian/saved-discovery.json
+UMask=0077
+Environment=PATH=/usr/bin:/bin
+TimeoutStartSec=10min
+NoNewPrivileges=true
+RestrictSUIDSGID=true
+LockPersonality=true

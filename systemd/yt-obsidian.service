@@ -1,0 +1,13 @@
+[Unit]
+Description=Summarize saved YouTube and social content
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Projects/keepworthy
+ExecStart=/usr/bin/flock -n %t/yt-obsidian.lock /usr/bin/python3 -m src.poll
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-%h/.config/youtube-obsidian/auth.env
+UMask=0077
+TimeoutStartSec=4h

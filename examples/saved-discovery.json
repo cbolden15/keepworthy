@@ -1,0 +1,5 @@
+{
+  "cookies": "/absolute/private/meta-cookies.txt",
+  "database": "/absolute/private/discovery.sqlite3",
+  "queue": "/absolute/project/state/queue.jsonl"
+}

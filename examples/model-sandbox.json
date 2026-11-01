@@ -1,0 +1,5 @@
+{
+  "binary": "/opt/youtube-obsidian/claude",
+  "auth_file": "/var/lib/youtube-obsidian/claude-oauth.env",
+  "operator_uid": 1000
+}
