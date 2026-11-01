@@ -174,6 +174,42 @@ def record_import(db, *, file_name, sha256, fmt, counts, rows, now) -> int:
     return import_id
 
 
+def _utc_now(now=None) -> datetime:
+    return (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+
+
+def _sent_on(db, day: str) -> int:
+    """Rows the drip stamped on that UTC day (YYYY-MM-DD)."""
+    return db.execute("SELECT COUNT(*) FROM bookmarks WHERE substr(enqueued_at, 1, 10) = ?",
+                      (day,)).fetchone()[0]
+
+
+def _waiting(db) -> int:
+    return db.execute("SELECT COUNT(*) FROM bookmarks WHERE enqueued_at IS NULL").fetchone()[0]
+
+
+def drip(db, queue_path, limit: int, now: datetime | None = None) -> dict:
+    """Append up to `limit` unsent bookmarks per UTC day to the social queue,
+    newest saved first, undated last. Append first, stamp second (the
+    saved_discovery.flush_outbox contract): a crash in between redelivers the
+    item, and the processor's seen check makes the copy a "duplicate"."""
+    now = _utc_now(now)
+    sent_today = _sent_on(db, now.date().isoformat())
+    waiting = _waiting(db)
+    if limit <= 0:
+        return {"enqueued": 0, "sent_today": sent_today, "waiting": waiting, "limit": limit}
+    budget = max(0, limit - sent_today)
+    rows = db.execute("SELECT key, payload FROM bookmarks WHERE enqueued_at IS NULL "
+                      "ORDER BY saved_at DESC, key ASC LIMIT ?", (budget,)).fetchall()
+    stamp = now.isoformat()
+    for key, payload in rows:
+        ingest.append_item(queue_path, json.loads(payload))
+        with db:
+            db.execute("UPDATE bookmarks SET enqueued_at=? WHERE key=?", (stamp, key))
+    return {"enqueued": len(rows), "sent_today": sent_today + len(rows),
+            "waiting": waiting - len(rows), "limit": limit}
+
+
 @contextmanager
 def _import_lock(db_path):
     lock_path = Path(str(db_path) + LOCK_SUFFIX)

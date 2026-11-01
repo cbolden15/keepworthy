@@ -10,6 +10,7 @@ from src.config import allowed_topics
 from src import media, transcript as transcript_mod, meta as meta_mod, note as note_mod, summarize, state
 from src import social
 from src import article
+from src import importer
 from src import open_brain_bridge
 from src import finance_content
 
@@ -186,6 +187,16 @@ def main():
         log.info("processed %s → %s", vid, outcome)
     if not results:
         log.info("no new videos")
+
+    # phase 1b: drip imported bookmarks into the queue, behind live shares.
+    try:
+        if cfg.import_daily_limit and cfg.import_db_path.exists():
+            with importer.open_ledger(cfg.import_db_path) as db:
+                stats = importer.drip(db, cfg.queue_path, cfg.import_daily_limit)
+            log.info("import drip: enqueued %d (sent today %d, waiting %d, limit %d)",
+                     stats["enqueued"], stats["sent_today"], stats["waiting"], stats["limit"])
+    except Exception as e:
+        log.error("import drip failed: %s", type(e).__name__)
 
     # phase 2: shared social posts. Isolated so a queue failure can never take
     # the playlist pipeline down with it.
