@@ -1,9 +1,10 @@
 import fcntl
 import json
+import logging
 import sqlite3
 import stat
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -303,3 +304,128 @@ def test_exit_codes(tmp_path, monkeypatch, capsys):
     assert code == 1 and err == "OperationalError: database is locked\n"
     assert _run(capsys, "import")[0] == 2                    # argparse usage error
     assert _run(capsys, "frobnicate")[0] == 2
+
+
+# ---- status and cancel --------------------------------------------------------------
+
+def _drip(cfg, limit, now=None):
+    with closing(importer.open_ledger(cfg.import_db_path)) as db:
+        return importer.drip(db, cfg.queue_path, limit, now=now)
+
+
+def test_reimport_after_cancel_succeeds(tmp_path, monkeypatch, capsys):
+    cfg = _cfg(tmp_path, monkeypatch)
+    assert _run(capsys, "import", FIXTURES / "bookmarks.html")[0] == 0
+    assert _drip(cfg, 2)["enqueued"] == 2                     # k8s and essay, newest first
+    code, out, _err = _run(capsys, "cancel", 1, "--yes")
+    assert (code, out) == (0, "import 1 cancelled; deleted 1 unsent links\n")
+    code, out, _err = _run(capsys, "import", FIXTURES / "bookmarks.html",
+                           "--tag", "essays", "--tag", "python", "--tag", "misc")
+    assert code == 0 and out.endswith("import id: 2\n")
+    assert _counts(out) == {"found": 7, "new": 1, "already seen": 2, "filtered out": 1,
+                            "unsupported scheme": 2, "bad rows": 1}
+    assert _count(cfg, "bookmarks", "import_id=2") == 1
+    assert "https://example.com/root" in _payloads(cfg)
+    with closing(sqlite3.connect(cfg.import_db_path)) as db:
+        rows = db.execute("SELECT sha256, status FROM imports ORDER BY id").fetchall()
+    assert [status for _sha, status in rows] == ["cancelled", "active"]
+    assert rows[0][0] == rows[1][0]
+
+
+def test_cancel_dry_run_reports_and_keeps_rows(tmp_path, monkeypatch, capsys):
+    cfg = _cfg(tmp_path, monkeypatch)
+    assert _run(capsys, "import", FIXTURES / "pocket.csv")[0] == 0
+    code, out, _err = _run(capsys, "cancel", 1)
+    assert (code, out) == (0, "import 1 has 4 unsent links; pass --yes to cancel it and delete them\n")
+    assert _count(cfg, "bookmarks") == 4
+    assert _count(cfg, "imports", "status='active'") == 1
+
+
+def test_cancel_yes_deletes_unsent_only(tmp_path, monkeypatch, capsys):
+    cfg = _cfg(tmp_path, monkeypatch)
+    assert _run(capsys, "import", FIXTURES / "pocket.csv")[0] == 0
+    assert _drip(cfg, 1)["enqueued"] == 1
+    code, out, _err = _run(capsys, "cancel", 1, "--yes")
+    assert (code, out) == (0, "import 1 cancelled; deleted 3 unsent links\n")
+    assert _count(cfg, "bookmarks") == 1
+    assert _count(cfg, "bookmarks", "import_id=1 AND enqueued_at IS NOT NULL") == 1
+    assert _count(cfg, "imports", "status='cancelled'") == 1
+
+
+def test_cancel_already_cancelled_is_noop_exit_0(tmp_path, monkeypatch, capsys):
+    cfg = _cfg(tmp_path, monkeypatch)
+    assert _run(capsys, "import", FIXTURES / "pocket.csv")[0] == 0
+    assert _run(capsys, "cancel", 1, "--yes")[0] == 0
+    for extra in ([], ["--yes"]):
+        code, out, _err = _run(capsys, "cancel", 1, *extra)
+        assert (code, out) == (0, "import 1 is already cancelled\n")
+    assert _count(cfg, "imports") == 1
+
+
+def test_cancel_unknown_id_exit_2(tmp_path, monkeypatch, capsys):
+    _cfg(tmp_path, monkeypatch)
+    code, out, err = _run(capsys, "cancel", 9, "--yes")
+    assert (code, out, err) == (2, "", "there is no import 9\n")
+    assert _run(capsys, "cancel", "nine")[0] == 2
+
+
+def test_cancel_takes_the_lock(tmp_path, monkeypatch, capsys):
+    cfg = _cfg(tmp_path, monkeypatch)
+    assert _run(capsys, "import", FIXTURES / "pocket.csv")[0] == 0
+    with Path(f"{cfg.import_db_path}.lock").open("a") as holder:
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        code, _out, err = _run(capsys, "cancel", 1, "--yes")
+    assert code == 1 and err.startswith("another import is running (lock ")
+    assert _count(cfg, "bookmarks") == 4
+
+
+def test_status_counts_and_days_remaining(tmp_path, monkeypatch, capsys):
+    cfg = _cfg(tmp_path, monkeypatch, "IMPORT_DAILY_LIMIT=1\n")
+    assert _run(capsys, "import", FIXTURES / "pocket.csv")[0] == 0
+    yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+    assert _drip(cfg, 1, now=yesterday)["enqueued"] == 1
+    assert _drip(cfg, 1)["enqueued"] == 1
+    code, out, _err = _run(capsys, "status")
+    assert (code, out) == (0, "waiting: 2\nsent: 2\nsent today: 1\nlimit: 1 per day\n"
+                              "days remaining: 2\n")
+    with closing(importer.open_ledger(cfg.import_db_path)) as db:
+        assert importer.status(db, 20) == {"waiting": 2, "sent": 2, "sent_today": 1,
+                                           "limit": 20, "days_remaining": 1}
+
+
+def test_status_limit_zero(tmp_path, monkeypatch, capsys):
+    _cfg(tmp_path, monkeypatch, "IMPORT_DAILY_LIMIT=0\n")
+    assert _run(capsys, "import", FIXTURES / "pocket.csv")[0] == 0
+    code, out, _err = _run(capsys, "status")
+    assert (code, out) == (0, "waiting: 4\nsent: 0\nsent today: 0\nlimit: 0 per day\n"
+                              "days remaining: off (IMPORT_DAILY_LIMIT=0)\n")
+
+
+def test_no_urls_in_log_output(tmp_path, monkeypatch, capsys, caplog):
+    cfg = _cfg(tmp_path, monkeypatch)
+    printed = []
+
+    def run(*argv):
+        code, out, err = _run(capsys, *argv)
+        printed.extend([out, err])
+        return code
+    with caplog.at_level(logging.DEBUG):
+        assert run("import", FIXTURES / "bookmarks.html", "--dry-run") == 0
+        assert run("import", FIXTURES / "bookmarks.html", "--why", "Q3:") == 0
+        assert run("import", FIXTURES / "bookmarks.html") == 0             # repeat
+        assert run("import", FIXTURES / "not-a-bookmark-file.txt") == 2
+        assert run("import", tmp_path / "missing-example.com.html") == 2
+        assert run("import", FIXTURES / "pocket.csv", "--since", "soon") == 2
+        assert run("import", FIXTURES / "pocket.csv", "--why", "a\nb") == 2
+        assert run("status") == 0
+        assert run("cancel", 1) == 0
+        assert run("cancel", 1, "--yes") == 0
+        assert run("cancel", 7) == 2
+        with Path(f"{cfg.import_db_path}.lock").open("a") as holder:
+            fcntl.flock(holder, fcntl.LOCK_EX)
+            assert run("import", FIXTURES / "raindrop.csv") == 1
+        monkeypatch.setattr(importer, "record_import",
+                            lambda *a, **k: (_ for _ in ()).throw(sqlite3.IntegrityError("x")))
+        assert run("import", FIXTURES / "raindrop.csv") == 1
+    assert "example." not in caplog.text
+    assert not [text for text in printed if "example." in text]

@@ -3,6 +3,8 @@ poll.py later drips the ledger's links into the social queue.
 
     python -m src.importer import FILE [--dry-run] [--format F] [--folder PATH]
                                        [--tag NAME ...] [--since YYYY-MM-DD] [--why TEXT]
+    python -m src.importer status
+    python -m src.importer cancel IMPORT_ID [--yes]
 
 Output and errors carry counts, the import id, the format and exception type
 names only: never a url, title, folder, tag, note or file name."""
@@ -10,6 +12,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
@@ -210,6 +213,28 @@ def drip(db, queue_path, limit: int, now: datetime | None = None) -> dict:
             "waiting": waiting - len(rows), "limit": limit}
 
 
+def status(db, limit: int, now=None) -> dict:
+    """Ledger counts for the status command; sent_today uses the drip's UTC day."""
+    now = _utc_now(now)
+    waiting = _waiting(db)
+    sent = db.execute("SELECT COUNT(*) FROM bookmarks WHERE enqueued_at IS NOT NULL").fetchone()[0]
+    return {"waiting": waiting, "sent": sent, "sent_today": _sent_on(db, now.date().isoformat()),
+            "limit": limit, "days_remaining": math.ceil(waiting / limit) if limit > 0 else None}
+
+
+def cancel(db, import_id: int, *, yes: bool) -> int:
+    """The number of this import's unsent rows. With yes=True, in one
+    transaction, the import is marked cancelled and those rows are deleted;
+    sent rows stay, so they keep deduping a later re-import."""
+    if not yes:
+        return db.execute("SELECT COUNT(*) FROM bookmarks WHERE import_id=? AND enqueued_at IS NULL",
+                          (import_id,)).fetchone()[0]
+    with db:
+        db.execute("UPDATE imports SET status='cancelled' WHERE id=?", (import_id,))
+        return db.execute("DELETE FROM bookmarks WHERE import_id=? AND enqueued_at IS NULL",
+                          (import_id,)).rowcount
+
+
 @contextmanager
 def _import_lock(db_path):
     lock_path = Path(str(db_path) + LOCK_SUFFIX)
@@ -298,6 +323,37 @@ def _run_import(cfg, args, path, prefix, db) -> int:
     return 0
 
 
+def _cmd_status(cfg) -> int:
+    with closing(open_ledger(cfg.import_db_path)) as db:
+        stats = status(db, cfg.import_daily_limit)
+    print(f"waiting: {stats['waiting']}")
+    print(f"sent: {stats['sent']}")
+    print(f"sent today: {stats['sent_today']}")
+    print(f"limit: {stats['limit']} per day")
+    if stats["days_remaining"] is None:
+        print("days remaining: off (IMPORT_DAILY_LIMIT=0)")
+    else:
+        print(f"days remaining: {stats['days_remaining']}")
+    return 0
+
+
+def _cmd_cancel(cfg, args) -> int:
+    with _import_lock(cfg.import_db_path), closing(open_ledger(cfg.import_db_path)) as db:
+        row = db.execute("SELECT status FROM imports WHERE id=?", (args.import_id,)).fetchone()
+        if row is None:
+            raise UsageError(f"there is no import {args.import_id}")
+        if row[0] == "cancelled":
+            print(f"import {args.import_id} is already cancelled")
+            return 0
+        count = cancel(db, args.import_id, yes=args.yes)
+    if args.yes:
+        print(f"import {args.import_id} cancelled; deleted {count} unsent links")
+    else:
+        print(f"import {args.import_id} has {count} unsent links; "
+              "pass --yes to cancel it and delete them")
+    return 0
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m src.importer",
                                      description="Import a bookmark file into the drip ledger.")
@@ -310,6 +366,10 @@ def _parser() -> argparse.ArgumentParser:
     imp.add_argument("--tag", action="append", help="only bookmarks with this tag (repeatable)")
     imp.add_argument("--since", help="only bookmarks saved on or after YYYY-MM-DD")
     imp.add_argument("--why", default="", help="text put before each link's why")
+    commands.add_parser("status", help="show waiting and sent counts")
+    cancel_cmd = commands.add_parser("cancel", help="stop an import and delete its unsent links")
+    cancel_cmd.add_argument("import_id", type=int)
+    cancel_cmd.add_argument("--yes", action="store_true", help="delete; without it, only count")
     return parser
 
 
@@ -328,6 +388,10 @@ def main(argv=None) -> int:
     try:
         project_root = Path(__file__).resolve().parent.parent
         cfg = config_mod.load_config(project_root / "config.env", environment=os.environ)
+        if args.command == "status":
+            return _cmd_status(cfg)
+        if args.command == "cancel":
+            return _cmd_cancel(cfg, args)
         return _cmd_import(cfg, args)
     except (UsageError, importers.ParseError) as e:
         print(str(e), file=sys.stderr)
