@@ -1284,3 +1284,97 @@ def test_generic_article_saved_items_carry_text_and_status(tmp_path):
     assert (records[full["url"]]["fetch_status"], records[full["url"]]["body"]) == ("complete", text)
     assert (records[full["url"]]["source_type"], records[full["url"]]["content_kind"]) == ("web", "article")
     assert (records[thin["url"]]["fetch_status"], records[thin["url"]]["body"]) == ("partial", "teaser words")
+
+
+def test_generic_size_capped_long_page_takes_text_path(tmp_path):
+    cfg = _cfg(tmp_path, OPEN_BRAIN_SAVED_SPOOL_DIR=f"{tmp_path}/saved")
+    text = " ".join(f"w{i}" for i in range(400))
+    seen = {}
+
+    def claude(prompt, payload, images, model, cwd):
+        seen["payload"] = payload
+        return _MODEL_OUT
+    deps = _deps(fetch_article=lambda url: _art(text, "partial", "size cap"),
+                 fetch_social_media=_never, fetch_page_text=_never, run_claude_social=claude)
+    item = {"url": "https://example.com/huge-page", "text": None}
+    assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "summarized"
+    assert "## Source text\n" + text in seen["payload"]
+    note = _only_note(tmp_path)
+    fm = note.split("---")[1]
+    assert 'extraction: "partial"' in fm and "word_count: 400" in fm
+    assert "> [!note]- Full source text (cut at the 5 MB size cap)\n> " + text in note
+    [record] = _saved(tmp_path)
+    assert (record["fetch_status"], record["body"]) == ("partial", text)
+
+
+def test_generic_size_capped_short_page_falls_through(tmp_path):
+    cfg = _cfg(tmp_path)
+    calls = []
+
+    def media(*args, **kw):
+        calls.append(True)
+        return _no_media(*args, **kw)
+    deps = _deps(fetch_article=lambda url: _art("only a few words", "partial", "size cap"),
+                 fetch_social_media=media, run_claude_social=_never)
+    item = {"url": "https://example.com/huge-teaser", "text": None}
+    assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "partial"
+    assert calls == [True]
+    note = _only_note(tmp_path)
+    assert 'status: "partial"' in note and "Only part of this page could be fetched (size cap)" in note
+
+
+def test_generic_size_capped_pdf_keeps_media_fallback(tmp_path):
+    cfg = _cfg(tmp_path)
+    text = " ".join(f"w{i}" for i in range(400))
+    calls = []
+
+    def media(*args, **kw):
+        calls.append(True)
+        return _video_media(*args, **kw)
+    deps = _deps(fetch_article=lambda url: _art(text, "partial", "size cap",
+                                                source_format="pdf", kind="pdf"),
+                 fetch_social_media=media)
+    item = {"url": "https://example.com/huge.pdf", "text": None}
+    assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "summarized"
+    assert calls == [True]
+    assert "Full source text" not in _only_note(tmp_path)
+
+
+def test_generic_page_capped_pdf_takes_text_path(tmp_path):
+    cfg = _cfg(tmp_path)
+    text = " ".join(f"w{i}" for i in range(400))
+    deps = _deps(fetch_article=lambda url: _art(text, "partial", "page cap",
+                                                source_format="pdf", kind="pdf"),
+                 fetch_social_media=_never, fetch_page_text=_never)
+    item = {"url": "https://example.com/long.pdf", "text": None}
+    assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "summarized"
+    note = _only_note(tmp_path)
+    assert 'extraction: "partial"' in note and 'source_format: "pdf"' in note
+    assert "> [!note]- Full source text (first 300 pages)\n> " + text in note
+
+
+def test_generic_partial_with_empty_video_writes_text_kind(tmp_path):
+    cfg = _cfg(tmp_path)
+
+    def silent_video(url, ck, td, **kw):
+        out = _video_media(url, ck, td)
+        out["meta"]["caption"] = ""
+        return out
+    deps = _deps(fetch_article=lambda url: _art("teaser words", "partial", "http 403"),
+                 fetch_social_media=silent_video, transcribe_audio=lambda p, k, m: None,
+                 run_claude_social=_never)
+    item = {"url": "https://example.com/teaser-video", "text": None}
+    assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "partial"
+    assert 'type: "text"' in _only_note(tmp_path).split("---")[1]
+
+
+def test_generic_text_path_model_failure_keeps_article_body(tmp_path):
+    cfg = _cfg(tmp_path, MAX_ATTEMPTS=1, OPEN_BRAIN_SAVED_SPOOL_DIR=f"{tmp_path}/saved")
+    text = " ".join(f"w{i}" for i in range(300))
+    deps = _deps(fetch_article=lambda url: _art(text), fetch_social_media=_never,
+                 fetch_page_text=_never, run_claude_social=_boom_claude)
+    item = {"url": "https://example.com/model-down", "text": None}
+    assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "summary-failed"
+    assert 'status: "summary-failed"' in _only_note(tmp_path)
+    [record] = _saved(tmp_path)
+    assert (record["fetch_status"], record["body"]) == ("complete", text)

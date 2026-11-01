@@ -421,8 +421,11 @@ def _emit_fetched_saved_item(cfg, item, post_meta, key, media, page, transcript,
         body = article_text or "\n\n".join(
             part for part in (media["meta"].get("caption") or "",
                               (page or {}).get("text") or "") if part)
-        fetch_status = ("partial" if media["kind"] == "video" and transcript is None
-                        else "complete")
+        if article_text:                 # the text path: a capped read is partial
+            fetch_status = "partial" if post_meta.get("extraction") == "partial" else "complete"
+        else:
+            fetch_status = ("partial" if media["kind"] == "video" and transcript is None
+                            else "complete")
         return _emit_saved_item(cfg, item, post_meta, key, fetch_status,
                                 summary=summary, body=body, media_text=transcript or "")
     except Exception as e:
@@ -452,8 +455,8 @@ def process_social_item(cfg, project_root, item, processed, deps, key, prompt_te
     why = item.get("why", "")
 
     # Generic urls try the article reader first. A refused address or a dead
-    # host ends here without the media tools; an unsupported type (None) or a
-    # partial read falls through to them, in case the page is mostly a video.
+    # host ends here without the media tools; an unsupported type (None) or
+    # another partial read falls through to them, in case the page is mostly a video.
     art = None
     if platform == "generic":
         try:
@@ -464,7 +467,12 @@ def process_social_item(cfg, project_root, item, processed, deps, key, prompt_te
                                "invalid", shared_text, processed, deps, reason=_REFUSED_REASON)
         except article.FetchError as e:
             return _article_fetch_failed(cfg, item, url, key, shared_text, processed, deps, e)
-    text_path = art is not None and art["extraction"] == "full"
+    # A capped read (HTML over the size cap, PDF over the page cap) with
+    # enough words is summarized from the text that was read.
+    text_path = art is not None and (art["extraction"] == "full" or (
+        art["extraction"] == "partial" and art["word_count"] >= article.MIN_WORDS
+        and ((art["reason"] == "size cap" and art["source_format"] == "html")
+             or art["reason"] == "page cap")))
     article_text = art["text"] if text_path else ""
 
     with tempfile.TemporaryDirectory() as td:   # media lives here; claude reads
@@ -546,6 +554,7 @@ def process_social_item(cfg, project_root, item, processed, deps, key, prompt_te
         if not has_content and art is not None:
             # a partial article and nothing from the media tools: a thin note
             # now. Retrying would only fetch the same paywall or teaser again.
+            post_meta["kind"] = "text"            # nothing from the media tools made it in
             _emit_saved_item(cfg, item, post_meta, key, "partial", body=art["text"])
             return _write_stub(cfg, post_meta, key, "partial", shared_text, processed, deps)
         if not has_content:                   # fetch failure → same retry policy

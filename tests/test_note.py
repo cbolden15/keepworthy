@@ -2,6 +2,7 @@ import re
 from datetime import date, datetime
 from pathlib import Path
 
+import pytest
 import yaml
 
 from src.note import build_note, build_stub_note
@@ -647,6 +648,28 @@ def test_build_social_note_appends_source_text():
     assert out.endswith("> [!note]- Full source text\n> First line.\n> \n> --- \n> Last line.\n")
     assert out.index("> [!note]- Full transcript") < out.index("> [!note]- Full source text")
     _frontmatter_block(out)                  # the quoted '---' adds no fence
+
+
+@pytest.mark.parametrize("reason, header", [
+    ("size cap", "> [!note]- Full source text (cut at the 5 MB size cap)\n"),
+    ("page cap", "> [!note]- Full source text (first 300 pages)\n"),
+])
+def test_build_social_note_source_text_names_the_cap(reason, header):
+    pm = {"platform": "generic", "url": "https://example.com/a", "kind": "text",
+          "extraction": "partial", "word_count": 2, "source_format": "html",
+          "extraction_reason": reason}
+    out = build_social_note(pm, {"tags": []}, "body", None, "2026-11-01",
+                            source_text="Read text.")
+    assert out.endswith(header + "> Read text.\n")
+
+
+def test_build_social_note_source_text_has_no_suffix_when_full():
+    pm = {"platform": "generic", "url": "https://example.com/a", "kind": "text",
+          "extraction": "full", "word_count": 2, "source_format": "html",
+          "extraction_reason": ""}
+    out = build_social_note(pm, {"tags": []}, "body", None, "2026-11-01",
+                            source_text="Read text.")
+    assert out.endswith("\n\n> [!note]- Full source text\n> Read text.\n")
 
 
 def test_build_social_stub_note_partial_names_the_reason():

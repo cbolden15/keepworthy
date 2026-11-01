@@ -217,9 +217,11 @@ def _transcript_callout(transcript: str) -> str:
     quoted = "\n".join("> " + ln for ln in transcript.splitlines())
     return "> [!note]- Full transcript\n" + quoted
 
-def _source_text_callout(text: str) -> str:
+_CAP_SUFFIX = {"size cap": " (cut at the 5 MB size cap)", "page cap": " (first 300 pages)"}
+
+def _source_text_callout(text: str, reason: str = "") -> str:
     quoted = "\n".join("> " + ln for ln in text.splitlines())
-    return "> [!note]- Full source text\n" + quoted
+    return f"> [!note]- Full source text{_CAP_SUFFIX.get(reason, '')}\n" + quoted
 
 def _capture_context(meta: dict) -> str:
     why = str(meta.get("capture_why") or "").strip()
@@ -306,7 +308,7 @@ def build_social_note(post_meta, model_meta, body, transcript, processed,
                              processed_at)
     tail = f"\n\n{_transcript_callout(transcript)}" if transcript else ""
     if source_text:                  # the full text stays even when the model saw less
-        tail += f"\n\n{_source_text_callout(source_text)}"
+        tail += f"\n\n{_source_text_callout(source_text, post_meta.get('extraction_reason') or '')}"
     return f"{fm}\n\n{_capture_context(post_meta)}{body.strip()}{tail}\n"
 
 def _frontmatter_value(path: Path, key: str) -> str | None:
