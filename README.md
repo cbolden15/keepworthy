@@ -70,6 +70,52 @@ free local media processing is enabled, without consuming retry attempts or
 calling the optional legacy Gemini provider. Image/text items use available
 source content. A successful caption-only note does not imply image analysis.
 
+## Articles and PDFs
+
+Share an article, a newsletter's web page, or a link to a PDF through `/share`
+and the note holds a summary plus the full extracted text in a collapsed
+`Full source text` callout. The model reads at most 60,000 characters of it;
+the note keeps all of it.
+
+Full extraction needs an optional, hash-pinned extra (trafilatura for HTML,
+pypdf for PDF). Install it into the interpreter or venv that runs `src.poll`:
+
+```sh
+python3.12 -m pip install --require-hashes --only-binary=:all: -r requirements-capture.lock
+```
+
+The extra keeps its dependencies' own licenses: trafilatura is Apache-2.0,
+pypdf and lxml are BSD-3-Clause, and certifi is MPL-2.0. `tld` offers MPL-1.1,
+GPL-2.0-only, or LGPL-2.1-or-later, and Keepworthy uses it under MPL-1.1.
+
+Each poll run logs the mode in use, `article capture: full (...)` or
+`article capture: fallback (...)`. Without the extra, Keepworthy reads only the
+page's title and description meta tags and marks the note partial.
+
+Notes from this path carry three more frontmatter keys after `type`:
+
+- `extraction`: `full`, or `partial` when only part of the page could be read
+- `word_count`: words in the extracted text
+- `source_format`: `html` or `pdf`
+
+A page that can't be read in full goes through the media tools next, in case
+it is mostly an embedded video. That covers paywalled or login pages, other
+HTTP 4xx responses, pages under 150 words, size caps, encrypted PDFs, HTML or
+PDF text the extractor can't parse, and responses sent with a
+`Content-Encoding` other than `identity`, which Keepworthy treats as
+unsupported. If the media tools find nothing, Keepworthy writes a short note
+with `status: "partial"` right away instead of retrying, so a paywalled
+article gives you a partial note by design. Search for that status to find
+them. Sharing the same link again later rewrites that note.
+
+Fetch limits: only `http` and `https`. Every address a host resolves to, on
+every redirect, has to be public; private, loopback, link-local, CGNAT, and
+cloud metadata addresses are refused and filed as `invalid`. The connection
+goes to the address that was checked. No cookies or credentials are sent.
+Each network operation gets 20 seconds and a whole fetch gets 60 seconds
+(over HTTPS the worst case is about 80 seconds). A fetch follows at most 5
+redirects and reads at most 5 MB of HTML, or 20 MB and 300 pages of PDF.
+
 ## Optional private media and finance
 
 Advanced processing requires the operator-managed Linux setup in
@@ -130,6 +176,8 @@ python3.12 -m venv .venv
 Tests use synthetic fixtures and no live accounts or model calls. The visual
 extraction eval has a fixed synthetic image with exact quantity/timing checks.
 GitHub tests and secret scanning run automatically for public repositories.
+A second job, `tests-capture`, runs the same suite with
+`requirements-capture.lock` installed; the default job covers the fallback.
 For private repositories, hosted jobs are skipped to avoid enabling runner
 billing; run the same checks locally. Actions and scanner binaries are pinned.
 

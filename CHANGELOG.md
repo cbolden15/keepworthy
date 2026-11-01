@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.0 — Unreleased
+
+- Capture articles, newsletter web pages, and PDFs shared through `/share`.
+  Notes keep the full extracted text in a collapsed callout; the model reads
+  up to 60,000 characters of it.
+- Add the optional hash-pinned extra `requirements-capture.lock` (trafilatura
+  2.3.1, pypdf 6.21.1). Without it, generic links fall back to meta tags and a
+  partial note.
+- Add `extraction`, `word_count`, and `source_format` frontmatter keys to notes
+  from the article path.
+- Add the `partial` note status for pages that could only be read in part.
+  These notes are written once, without retries.
+- Protect generic fetches against SSRF: http and https only, public addresses
+  only on every redirect, connections pinned to the checked address, no
+  cookies, and time, size, and page limits (20 seconds per network operation,
+  60 seconds per fetch).
+- Treat responses with a `Content-Encoding` other than `identity` as
+  unsupported and hand them to the media path.
+
 ## 0.2.0 — 2026-11-01
 
 - Publish the reusable pipeline as Keepworthy with clean source history.
