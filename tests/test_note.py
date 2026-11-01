@@ -619,3 +619,54 @@ def test_processed_at_does_not_reach_the_filename():
     # would fail _DATE.fullmatch and file every note under "undated".
     assert content_filename("2026-07-20", "A Post", "youtube") == \
         "2026-07-20 A Post (YouTube).md"
+
+
+def test_social_frontmatter_omits_capture_keys_by_default():
+    pm = {"platform": "generic", "url": "https://example.com/a", "title": "T", "kind": "text"}
+    for out in (build_social_note(pm, {"tags": []}, "body", None, "2026-11-01"),
+                build_social_stub_note(pm, "fetch-failed", None, "2026-11-01")):
+        fm = _frontmatter_block(out)
+        assert "extraction:" not in fm and "word_count:" not in fm and "source_format:" not in fm
+
+
+def test_social_frontmatter_adds_capture_keys_after_type():
+    pm = {"platform": "generic", "url": "https://example.com/a", "title": "T", "kind": "text",
+          "extraction": "full", "word_count": 1843, "source_format": "html",
+          "extraction_reason": ""}
+    out = build_social_note(pm, {"category": "ai-dev", "tags": []}, "body", None, "2026-11-01")
+    assert ('type: "text"\nextraction: "full"\nword_count: 1843\nsource_format: "html"\n'
+            'category: "ai-dev"') in out
+    assert "extraction_reason" not in out
+    assert yaml.safe_load(_frontmatter_block(out))["word_count"] == 1843
+
+
+def test_build_social_note_appends_source_text():
+    pm = {"platform": "generic", "url": "https://example.com/a", "kind": "text"}
+    out = build_social_note(pm, {"tags": []}, "# Summary\nbody", "spoken words", "2026-11-01",
+                            source_text="First line.\n\n--- \nLast line.")
+    assert out.endswith("> [!note]- Full source text\n> First line.\n> \n> --- \n> Last line.\n")
+    assert out.index("> [!note]- Full transcript") < out.index("> [!note]- Full source text")
+    _frontmatter_block(out)                  # the quoted '---' adds no fence
+
+
+def test_build_social_stub_note_partial_names_the_reason():
+    pm = {"platform": "generic", "url": "https://example.com/paywalled", "kind": "text",
+          "extraction": "partial", "word_count": 2, "source_format": "html",
+          "extraction_reason": "http 403", "capture_why": "Pricing research"}
+    out = build_social_stub_note(pm, "partial", "read later", "2026-11-01")
+    assert 'status: "partial"' in out
+    assert "Only part of this page could be fetched (http 403); saved for manual review." in out
+    assert "## Why saved\nPricing research" in out
+    assert "Original: https://example.com/paywalled" in out
+    assert "> Shared note: read later" in out
+    assert "extraction_reason" not in _frontmatter_block(out)
+
+
+def test_build_social_stub_note_reason_override():
+    pm = {"platform": "generic", "url": "http://10.0.0.5/", "kind": "text",
+          "stub_reason": "This url was refused (private or non-http address); "
+                         "saved for manual review."}
+    out = build_social_stub_note(pm, "invalid", None, "2026-11-01")
+    assert 'status: "invalid"' in out
+    assert "This url was refused (private or non-http address)" in out
+    assert "arrived without a usable url" not in out and "stub_reason" not in out

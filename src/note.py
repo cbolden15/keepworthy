@@ -217,6 +217,10 @@ def _transcript_callout(transcript: str) -> str:
     quoted = "\n".join("> " + ln for ln in transcript.splitlines())
     return "> [!note]- Full transcript\n" + quoted
 
+def _source_text_callout(text: str) -> str:
+    quoted = "\n".join("> " + ln for ln in text.splitlines())
+    return "> [!note]- Full source text\n" + quoted
+
 def _capture_context(meta: dict) -> str:
     why = str(meta.get("capture_why") or "").strip()
     return f"## Why saved\n{why}\n\n" if why else ""
@@ -244,6 +248,17 @@ def build_stub_note(video_meta, status, processed, processed_at=None) -> str:
                            "(rate limit or unavailable subtitles); not summarized.",
     }.get(status, "Not summarized.")
     return f"{fm}\n\n{reason}\n"
+
+def _capture_lines(post_meta: dict) -> list[str]:
+    """Only notes from the article reader carry these, so every other note
+    keeps its frontmatter byte for byte."""
+    if "extraction" not in post_meta:
+        return []
+    return [
+        f'extraction: {_yaml_str(post_meta.get("extraction") or "")}',
+        f'word_count: {int(post_meta.get("word_count") or 0)}',
+        f'source_format: {_yaml_str(post_meta.get("source_format") or "")}',
+    ]
 
 def _social_frontmatter(post_meta: dict, model_meta: dict, status: str, processed: str,
                         processed_at: str | None = None) -> str:
@@ -276,6 +291,7 @@ def _social_frontmatter(post_meta: dict, model_meta: dict, status: str, processe
         f'capture_context_at: {_yaml_str(post_meta.get("capture_context_at", ""))}',
         f'capture_source: {_yaml_str(post_meta.get("capture_source", "share"))}',
         f'type: {_yaml_str(kind)}',
+        *_capture_lines(post_meta),
         f'category: {_yaml_str(model_meta.get("category", "other"))}',
         f'topic: {_yaml_str(model_meta.get("topic", "Other"))}',
         f'subtopic: {_yaml_str(model_meta.get("subtopic", "General"))}',
@@ -285,10 +301,12 @@ def _social_frontmatter(post_meta: dict, model_meta: dict, status: str, processe
     ])
 
 def build_social_note(post_meta, model_meta, body, transcript, processed,
-                      processed_at=None) -> str:
+                      processed_at=None, source_text: str = "") -> str:
     fm = _social_frontmatter(post_meta, model_meta, "summarized", processed,
                              processed_at)
     tail = f"\n\n{_transcript_callout(transcript)}" if transcript else ""
+    if source_text:                  # the full text stays even when the model saw less
+        tail += f"\n\n{_source_text_callout(source_text)}"
     return f"{fm}\n\n{_capture_context(post_meta)}{body.strip()}{tail}\n"
 
 def _frontmatter_value(path: Path, key: str) -> str | None:
@@ -334,11 +352,17 @@ def build_social_stub_note(post_meta, status, shared_text, processed,
                            processed_at=None) -> str:
     fm = _social_frontmatter(post_meta, {"category": "other", "tags": []}, status,
                              processed, processed_at)
-    reason = {
-        "fetch-failed": "Could not fetch this post; saved for manual review.",
-        "summary-failed": "Summarization failed after repeated attempts.",
-        "invalid": "This share arrived without a usable url; saved for manual review.",
-    }.get(status, "Not summarized.")
+    if post_meta.get("stub_reason"):
+        reason = post_meta["stub_reason"]
+    elif status == "partial":
+        why = post_meta.get("extraction_reason") or "unknown reason"
+        reason = f"Only part of this page could be fetched ({why}); saved for manual review."
+    else:
+        reason = {
+            "fetch-failed": "Could not fetch this post; saved for manual review.",
+            "summary-failed": "Summarization failed after repeated attempts.",
+            "invalid": "This share arrived without a usable url; saved for manual review.",
+        }.get(status, "Not summarized.")
     shared = f"\n\n> Shared note: {shared_text}" if shared_text else ""
     return (f"{fm}\n\n{_capture_context(post_meta)}{reason}\n\n"
             f"Original: {post_meta.get('url', '')}{shared}\n")
