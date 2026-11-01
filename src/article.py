@@ -10,6 +10,7 @@ import logging
 import re
 import socket
 import ssl
+import threading
 import time
 from dataclasses import dataclass
 from urllib.parse import quote, urljoin, urlsplit
@@ -165,7 +166,25 @@ def _check_deadline(deadline: float) -> None:
     # TIMEOUT_S bounds each socket operation; this bounds the whole fetch, so
     # a server trickling a byte every few seconds cannot hold a worker
     if _clock() > deadline:
-        raise FetchError(f"fetch exceeded the {MAX_FETCH_S}s deadline")
+        raise _past_deadline()
+
+
+def _past_deadline() -> FetchError:
+    return FetchError(f"fetch exceeded the {MAX_FETCH_S}s deadline")
+
+
+def _abort(conn, expired: threading.Event) -> None:
+    """Timer callback at the deadline. Shutting the socket down wakes a recv
+    blocked in the fetching thread, which a per-recv timeout never does for a
+    server that trickles. socket.socket.shutdown skips SSLSocket's override,
+    so the TLS object is left for the reader to fail on cleanly."""
+    expired.set()
+    sock = getattr(conn, "sock", None)
+    if sock is not None:
+        try:
+            socket.socket.shutdown(sock, socket.SHUT_RDWR)
+        except OSError:
+            pass    # not connected, or detached mid-handshake: conn.timeout bounds that
 
 
 def _read_capped(resp, head: bytes, cap: int, length: str | None,
@@ -212,10 +231,20 @@ def _fetch(url: str, resolver, connector) -> Fetched:
         _check_deadline(deadline)
         scheme, host, port, path = _target(current)
         ip = _check_host(host, port, resolver)
-        conn = None
+        remaining = deadline - _clock()
+        if remaining <= 0:                      # DNS used it up; 0 would mean non-blocking
+            raise _past_deadline()
+        expired = threading.Event()
+        conn = timer = None
         try:
             conn = connector(ip, port, host, scheme)
+            conn.timeout = min(TIMEOUT_S, remaining)    # bounds connect and TLS handshake
+            timer = threading.Timer(remaining, _abort, (conn, expired))
+            timer.daemon = True
+            timer.start()
             conn.request("GET", path, headers=_headers(host, port, scheme))
+            if expired.is_set():                # fired before the socket existed
+                raise _past_deadline()
             resp = conn.getresponse()
             status = resp.status
             if status in _REDIRECTS:
@@ -228,10 +257,17 @@ def _fetch(url: str, resolver, connector) -> Fetched:
                 raise FetchError(f"http {status} from {host}")
             if 400 <= status < 500 and status not in _PARTIAL_HTTP:
                 return Fetched(status, current, host, None)
-            return _read(resp, status, current, host, deadline)
+            got = _read(resp, status, current, host, deadline)
+            if expired.is_set():                # the cut-off body looks like EOF
+                raise _past_deadline()
+            return got
         except (OSError, http.client.HTTPException) as e:
+            if expired.is_set():
+                raise _past_deadline() from e
             raise FetchError(f"fetch failed for {host}: {e}") from e
         finally:
+            if timer is not None:
+                timer.cancel()
             if conn is not None:
                 conn.close()
     raise FetchError(f"more than {MAX_REDIRECTS} redirects")

@@ -1,6 +1,8 @@
 import http.client
 import socket
 import ssl
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -380,3 +382,44 @@ def test_deadline_is_checked_before_each_hop(monkeypatch):
     with pytest.raises(FetchError, match="deadline"):
         article._fetch("https://example.com/r", net.resolver, slow_connector)
     assert len(net.connects) == 1 and net.lookups == ["example.com"]
+
+
+@pytest.mark.parametrize("where", ["headers", "body"])
+def test_deadline_bounds_a_real_trickling_socket(monkeypatch, where):
+    # a real socket pair: each byte arrives well inside the per-recv timeout,
+    # so only the whole-fetch deadline can stop the read
+    monkeypatch.setattr(article, "MAX_FETCH_S", 1)
+    monkeypatch.setattr(article, "TIMEOUT_S", 0.5)
+    client, server = socket.socketpair()
+    head = (b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
+            b"Content-Length: 100000\r\n\r\n")
+
+    def serve():
+        try:
+            server.recv(65536)                  # the GET
+            if where == "body":
+                server.sendall(head)
+            trickle = head if where == "headers" else b"<html><body>" + b"x" * 100
+            for byte in trickle[:60]:           # at most ~6 s, then go quiet
+                server.sendall(bytes([byte]))
+                time.sleep(0.1)
+        except OSError:
+            pass
+
+    class PairConnection(http.client.HTTPConnection):
+        def connect(self):
+            client.settimeout(self.timeout)
+            self.sock = client
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(FetchError, match="deadline"):
+            article._fetch("http://example.com/", FakeNet().resolver,
+                           lambda *args: PairConnection(PUBLIC_IP, 80, timeout=article.TIMEOUT_S))
+        assert time.monotonic() - started < 3
+    finally:
+        server.close()
+        client.close()
+        thread.join(3)
