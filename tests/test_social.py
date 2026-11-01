@@ -1,5 +1,3 @@
-import urllib.error
-
 import pytest
 
 from src.social import (
@@ -53,38 +51,23 @@ def test_saved_content_dimensions_and_event_route_are_closed():
     )
 
 
-class FakeResponse:
-    def __init__(self, body):
-        self._body = body
 
-    def read(self):
-        return self._body
+import json as json_mod
+import subprocess
+from types import SimpleNamespace
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *a):
-        return False
+from src.social import fetch_social_media
 
 
-class FakeOpener:
-    def __init__(self, body):
-        self._body = body
+# ---- fetch_page_text through the article reader's guarded fetch (issue #2) ----
 
-    def open(self, req, timeout=None):
-        return FakeResponse(self._body)
+from tests.test_article import FakeNet, FakeResponse, _html
 
 
-class CapturingOpener:
-    def __init__(self, body=b"<html></html>"):
-        self._body = body
-        self.req = None
-        self.timeout = None
-
-    def open(self, req, timeout=None):
-        self.req = req
-        self.timeout = timeout
-        return FakeResponse(self._body)
+def _page(body, **kw):
+    net = FakeNet(_html(body), **kw)
+    return net, (lambda url, cookies_path=None: fetch_page_text(
+        url, cookies_path, resolver=net.resolver, connector=net.connector))
 
 
 def test_fetch_page_text_parses_og_tags():
@@ -93,66 +76,95 @@ def test_fetch_page_text_parses_og_tags():
       <meta property="og:description" content="The caption text"/>
       <meta name="author" content="@someone"/>
     </head><body>hi</body></html>"""
-    out = fetch_page_text("https://x.com/u/status/1", None, opener=FakeOpener(html))
+    _net, fetch = _page(html)
+    out = fetch("https://example.com/u/status/1")
     assert out == {"title": "A Post", "text": "The caption text", "author": "@someone"}
 
 
 def test_fetch_page_text_raises_fetcherror():
-    class Boom:
-        def open(self, req, timeout=None):
-            raise OSError("nope")
+    net = FakeNet(OSError("nope"))
     with pytest.raises(FetchError):
-        fetch_page_text("https://x.com/u/status/1", None, opener=Boom())
+        fetch_page_text("https://example.com/u/status/1", None,
+                        resolver=net.resolver, connector=net.connector)
 
 
 def test_fetch_page_text_wraps_http_error():
-    class Boom:
-        def open(self, req, timeout=None):
-            raise urllib.error.HTTPError(req.full_url, 404, "Not Found", None, None)
+    net = FakeNet(FakeResponse(503, {}, b""))
     with pytest.raises(FetchError):
-        fetch_page_text("https://x.com/u/status/1", None, opener=Boom())
+        fetch_page_text("https://example.com/u/status/1", None,
+                        resolver=net.resolver, connector=net.connector)
 
 
 def test_fetch_page_text_unescapes_html_entities():
-    html = b'<html><head><meta property="og:title" content="Cats &amp; Dogs"/></head></html>'
-    out = fetch_page_text("https://x.com/u/1", None, opener=FakeOpener(html))
-    assert out["title"] == "Cats & Dogs"
+    _net, fetch = _page(b'<html><head><meta property="og:title" content="Cats &amp; Dogs"/></head></html>')
+    assert fetch("https://example.com/u/1")["title"] == "Cats & Dogs"
 
 
 def test_fetch_page_text_handles_reversed_attribute_order():
-    html = b"""<html><head>
+    _net, fetch = _page(b"""<html><head>
       <meta content="Reversed Title" property="og:title"/>
       <meta content='Single Quoted Caption' property='og:description'/>
-    </head></html>"""
-    out = fetch_page_text("https://x.com/u/1", None, opener=FakeOpener(html))
+    </head></html>""")
+    out = fetch("https://example.com/u/1")
     assert out["title"] == "Reversed Title"
     assert out["text"] == "Single Quoted Caption"
 
 
-def test_fetch_page_text_sends_browser_user_agent_and_timeout():
-    opener = CapturingOpener()
-    fetch_page_text("https://x.com/u/status/1", None, opener=opener)
-    ua = opener.req.get_header("User-agent")
-    assert ua and "Mozilla" in ua
-    assert opener.timeout is not None and opener.timeout > 0
+def test_fetch_page_text_refuses_private_address():
+    net = FakeNet(addresses=("10.0.0.1",))
+    with pytest.raises(FetchError):
+        fetch_page_text("https://example.com/post", None,
+                        resolver=net.resolver, connector=net.connector)
+    assert net.connects == []
 
 
-def test_build_opener_handles_none_cookies_path():
-    opener = social._build_opener(None)
-    assert hasattr(opener, "open")
+def test_fetch_page_text_uses_article_fetch_with_chrome_ua_and_no_cookie(tmp_path):
+    cookies = tmp_path / "cookies.txt"
+    cookies.write_text(
+        "# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tTRUE\t0\tsession\tsecret\n")
+    net, fetch = _page(b"<html><head></head></html>")
+    fetch("https://example.com/post", cookies)
+    headers = {k.lower(): v for k, v in net.requests[0]["headers"].items()}
+    assert headers["user-agent"] == social._UA
+    assert "cookie" not in headers
+    assert not any("secret" in v for v in headers.values())
 
 
-def test_build_opener_handles_missing_cookies_file(tmp_path):
-    missing = tmp_path / "nope.txt"
-    opener = social._build_opener(missing)
-    assert hasattr(opener, "open")
+def test_fetch_page_text_non_html_returns_empty():
+    net = FakeNet(FakeResponse(200, {"Content-Type": "image/png"}, b"\x89PNG\r\n\x1a\n"))
+    out = fetch_page_text("https://example.com/photo.png", None,
+                          resolver=net.resolver, connector=net.connector)
+    assert out == {"title": "", "text": "", "author": ""}
 
 
-import json as json_mod
-import subprocess
-from types import SimpleNamespace
+def _failing_runner(cmds):
+    def runner(cmd, **kw):
+        cmds.append(cmd)
+        raise subprocess.CalledProcessError(1, cmd)    # yt-dlp fails, so gallery-dl runs too
+    return runner
 
-from src.social import fetch_social_media
+
+def test_generic_url_gets_no_cookies_for_ytdlp_and_gallerydl(tmp_path):
+    cookies = tmp_path / "cookies.txt"
+    cookies.write_text("# Netscape HTTP Cookie File\n")
+    cmds = []
+    fetch_social_media("https://example.com/post", cookies, tmp_path,
+                       runner=_failing_runner(cmds))
+    assert [cmd[0] for cmd in cmds] == ["yt-dlp", "gallery-dl"]
+    for cmd in cmds:
+        assert "--cookies" not in cmd and str(cookies) not in cmd
+
+
+def test_social_host_still_gets_cookies(tmp_path):
+    cookies = tmp_path / "cookies.txt"
+    cookies.write_text("# Netscape HTTP Cookie File\n")
+    cmds = []
+    fetch_social_media("https://www.instagram.com/p/abc/", cookies, tmp_path,
+                       runner=_failing_runner(cmds))
+    assert [cmd[0] for cmd in cmds] == ["yt-dlp", "gallery-dl"]
+    for cmd in cmds:
+        i = cmd.index("--cookies")
+        assert cmd[i + 1] == str(cookies)
 
 
 def _ok(stdout=""):

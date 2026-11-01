@@ -136,11 +136,11 @@ def _check_host(host: str, port: int, resolver) -> str:
     return str(getattr(first, "ipv4_mapped", None) or first)
 
 
-def _headers(host: str, port: int, scheme: str) -> dict:
+def _headers(host: str, port: int, scheme: str, *, user_agent: str = USER_AGENT) -> dict:
     shown = f"[{host}]" if ":" in host else host
     if port != (443 if scheme == "https" else 80):
         shown = f"{shown}:{port}"
-    return {"Host": shown, "User-Agent": USER_AGENT,
+    return {"Host": shown, "User-Agent": user_agent,
             "Accept": "text/html,application/pdf;q=0.9,*/*;q=0.1",
             "Accept-Encoding": "identity"}
 
@@ -233,7 +233,7 @@ def _read(resp, status: int, url: str, host: str, deadline: float) -> Fetched:
     return Fetched(status, url, host, fmt, data, capped, charset)
 
 
-def _fetch(url: str, resolver, connector) -> Fetched:
+def _fetch(url: str, resolver, connector, *, user_agent: str = USER_AGENT) -> Fetched:
     """One GET with redirect following; every hop re-runs the scheme and
     address checks before any connection is made."""
     deadline = _clock() + MAX_FETCH_S
@@ -253,7 +253,7 @@ def _fetch(url: str, resolver, connector) -> Fetched:
             timer = threading.Timer(remaining, _abort, (conn, expired))
             timer.daemon = True
             timer.start()
-            conn.request("GET", path, headers=_headers(host, port, scheme))
+            conn.request("GET", path, headers=_headers(host, port, scheme, user_agent=user_agent))
             if expired.is_set():                # fired before the socket existed
                 raise _past_deadline()
             resp = conn.getresponse()

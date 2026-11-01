@@ -2,14 +2,13 @@
 media download (yt-dlp video / gallery-dl image fallback)."""
 import hashlib
 import html as html_mod
-import http.cookiejar
 import json
 import logging
 import re
+import socket
 import subprocess
 import tempfile
 from functools import partial
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -116,26 +115,20 @@ def _meta_content(tags: list[dict], *keys: str) -> str:
                 return html_mod.unescape(attrs["content"]).strip()
     return ""
 
-def _build_opener(cookies_path):
-    jar = http.cookiejar.MozillaCookieJar()
-    if cookies_path:
-        try:
-            jar.load(str(cookies_path), ignore_discard=True, ignore_expires=True)
-        except OSError as e:
-            log.warning("could not load cookies from %s: %s", cookies_path, e)
-    return urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
-
-def fetch_page_text(url, cookies_path, opener=None) -> dict:
-    """Last-resort text extraction from og:/meta tags. A browser-like
-    User-Agent avoids block pages on these sites, and the fixed timeout
-    keeps a hung request from stalling the poll job."""
-    opener = opener or _build_opener(cookies_path)
-    req = urllib.request.Request(url, headers={"User-Agent": _UA})
+def fetch_page_text(url, cookies_path=None, opener=None, *, resolver=socket.getaddrinfo,
+                    connector=None) -> dict:
+    """Last-resort text from og:/meta tags. The GET goes through the article
+    reader's guarded fetch: public addresses only on every hop, the socket
+    pinned to the checked address, no cookie jar. cookies_path and opener are
+    accepted and ignored so existing callers keep working. The browser-like
+    User-Agent avoids block pages on social hosts."""
     try:
-        with opener.open(req, timeout=30) as resp:
-            body = resp.read()[:1_000_000].decode("utf-8", errors="replace")
-    except Exception as e:
+        got = article._fetch(url, resolver, connector or article._connect, user_agent=_UA)
+    except (article.BlockedURL, article.FetchError) as e:
         raise FetchError(f"page fetch failed for {url}: {e}") from e
+    if got.fmt != "html":
+        return {"title": "", "text": "", "author": ""}
+    body = article._decode(got.data, got.charset)
     tags = _meta_tags(body)
     return {
         "title": _meta_content(tags, "og:title", "twitter:title"),
@@ -209,7 +202,11 @@ def fetch_social_media(url, cookies_path, tmpdir, runner=subprocess.run) -> dict
     (CalledProcessError), hang (TimeoutExpired), or return unparseable
     output (JSONDecodeError/IndexError) -- none of those may abort the
     attempt at the next tool. Returning kind="none" lets the caller fall
-    back to page text instead of raising."""
+    back to page text instead of raising.
+
+    Only the social platforms get the cookie file. A generic url can point at
+    any host, and the owner's cookies must never reach it (issue #2)."""
+    cookies_path = cookies_path if classify_social_url(url) != "generic" else None
     for attempt in (_try_ytdlp, _try_gallerydl):
         try:
             out = attempt(url, cookies_path, tmpdir, runner)

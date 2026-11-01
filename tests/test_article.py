@@ -198,6 +198,12 @@ def test_no_cookie_jar_and_user_agent(tmp_path, monkeypatch):
     assert not any("secret" in v for v in headers.values())
 
 
+def test_fetch_user_agent_override():
+    net = FakeNet(_html())
+    article._fetch("https://example.com/", net.resolver, net.connector, user_agent="Agent/1")
+    assert net.requests[0]["headers"]["User-Agent"] == "Agent/1"
+
+
 def test_pinned_https_connection_verifies_url_host(monkeypatch):
     conn = article._connect(PUBLIC_IP, 443, "example.com", "https")
     assert (conn.host, conn.port, conn.timeout) == (PUBLIC_IP, 443, article.TIMEOUT_S)
