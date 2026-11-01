@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from src import article
+from src import article, config
 from src.article import BlockedURL, FetchError
 
 # example.com's IANA address. The connector in these tests is always fake, so
@@ -178,17 +178,20 @@ def test_host_header_keeps_a_non_default_port():
     assert net.requests[0]["headers"]["Host"] == "example.com:8080"
 
 
-def test_no_cookie_jar_and_user_agent(tmp_path):
+def test_no_cookie_jar_and_user_agent(tmp_path, monkeypatch):
     # a cookie file where the social path keeps one must change nothing: the
     # article fetch takes no cookie or credential input at all
-    (tmp_path / "cookies.txt").write_text(
+    cookies = tmp_path / "cookies.txt"
+    cookies.write_text(
         "# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tTRUE\t0\tsession\tsecret\n")
+    monkeypatch.setitem(config._DEFAULTS, "COOKIES_PATH", str(cookies))
     net = FakeNet(_html())
     net.fetch_raw("https://example.com/")
     headers = {k.lower(): v for k, v in net.requests[0]["headers"].items()}
     assert headers["user-agent"] == article.USER_AGENT
     assert headers["accept-encoding"] == "identity"
     assert "cookie" not in headers and "authorization" not in headers
+    assert not any("secret" in v for v in headers.values())
 
 
 def test_pinned_https_connection_verifies_url_host(monkeypatch):
@@ -260,3 +263,120 @@ def test_sniff(ctype, body, expected):
     assert got.fmt == expected
     if expected is None:
         assert resp.pos <= 512 and got.data == b""
+
+
+@pytest.mark.parametrize("ip", [
+    "2002:7f00:1::",                            # 6to4 wrapping 127.0.0.1
+    "2002:a00:5::",                             # 6to4 wrapping 10.0.0.5
+    "2001:0:4136:e378:8000:63bf:80ff:fffe",     # Teredo, client 127.0.0.1
+    "2001:0:4136:e378:8000:63bf:f5ff:fffa",     # Teredo, client 10.0.0.5
+])
+def test_blocked_embedded_ipv4(ip):
+    net = FakeNet(addresses=(ip,))
+    with pytest.raises(BlockedURL):
+        net.fetch_raw("http://example.com/")
+    assert net.connects == []
+
+
+def test_redirect_without_location_is_fetch_error():
+    net = FakeNet(FakeResponse(302, {}))
+    with pytest.raises(FetchError, match="Location"):
+        net.fetch_raw("https://example.com/r")
+    assert len(net.connects) == 1
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_partial_status_body_is_read(status):
+    body = b"<html><body>first paragraph of a paywalled story</body></html>"
+    got = FakeNet(FakeResponse(status, HTML, body)).fetch_raw("https://example.com/paid")
+    assert (got.status, got.fmt, got.data, got.capped) == (status, "html", body, False)
+
+
+def test_pdf_size_cap():
+    body = b"%PDF-1.4\n" + b"x" * (article.MAX_PDF_BYTES + 1024)
+    resp = FakeResponse(200, {"Content-Type": "application/pdf"}, body)
+    got = FakeNet(resp).fetch_raw("https://example.com/big.pdf")
+    assert got.fmt == "pdf" and got.capped
+    assert len(got.data) == article.MAX_PDF_BYTES
+    assert resp.pos <= article.MAX_PDF_BYTES + 1
+
+
+@pytest.mark.parametrize("ctype,expected", [
+    ("text/html; charset=ISO-8859-1", "ISO-8859-1"),
+    ('text/html; charset="windows-1252"', "windows-1252"),
+    ("text/html;CHARSET = Shift_JIS", "Shift_JIS"),
+    ("text/html", "utf-8"),
+])
+def test_charset_from_content_type(ctype, expected):
+    got = FakeNet(_html(headers={"Content-Type": ctype})).fetch_raw("https://example.com/")
+    assert got.charset == expected
+
+
+@pytest.mark.parametrize("exc", [
+    ssl.SSLError("tlsv1 alert internal error"),
+    ssl.SSLCertVerificationError("certificate verify failed: hostname mismatch"),
+])
+def test_tls_error_is_fetch_error(exc):
+    class TLSFailingConnection(FakeConnection):
+        def request(self, method, path, headers=None):
+            raise exc
+
+    made = []
+
+    def connector(ip, port, host, scheme):
+        made.append(TLSFailingConnection(None, []))
+        return made[-1]
+
+    with pytest.raises(FetchError):
+        article._fetch("https://example.com/", FakeNet().resolver, connector)
+    assert made[0].closed
+
+
+@pytest.mark.parametrize("encoding", ["gzip", "br", "deflate, gzip"])
+def test_compressed_body_is_unsupported(encoding):
+    resp = FakeResponse(200, {**HTML, "Content-Encoding": encoding},
+                        b"\x1f\x8b\x08\x00" + b"\0" * 2048)
+    got = FakeNet(resp).fetch_raw("https://example.com/")
+    assert (got.fmt, got.data) == (None, b"")
+    assert resp.pos == 0
+
+
+def test_identity_content_encoding_is_read():
+    resp = FakeResponse(200, {**HTML, "Content-Encoding": "identity"}, b"<html>ok</html>")
+    got = FakeNet(resp).fetch_raw("https://example.com/")
+    assert (got.fmt, got.data) == ("html", b"<html>ok</html>")
+
+
+def _frozen_clock(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(article, "_clock", lambda: now[0])
+    return now
+
+
+def test_deadline_stops_a_trickling_body(monkeypatch):
+    now = _frozen_clock(monkeypatch)
+
+    class Trickle(FakeResponse):
+        def read(self, amt=None):
+            now[0] += 15                        # each read takes 15 s of wall time
+            return super().read(amt)
+
+    body = b"<html><body>" + b"x" * (2 * 1024 * 1024)
+    resp = Trickle(200, HTML, body)
+    with pytest.raises(FetchError, match="deadline"):
+        FakeNet(resp).fetch_raw("https://example.com/slow")
+    assert resp.pos < len(body)
+    assert now[0] <= article.MAX_FETCH_S + 15
+
+
+def test_deadline_is_checked_before_each_hop(monkeypatch):
+    now = _frozen_clock(monkeypatch)
+    net = FakeNet(FakeResponse(302, {"Location": "/next"}), _html())
+
+    def slow_connector(*args):
+        now[0] += article.MAX_FETCH_S + 1
+        return net.connector(*args)
+
+    with pytest.raises(FetchError, match="deadline"):
+        article._fetch("https://example.com/r", net.resolver, slow_connector)
+    assert len(net.connects) == 1 and net.lookups == ["example.com"]

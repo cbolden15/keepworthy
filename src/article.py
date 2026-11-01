@@ -10,6 +10,7 @@ import logging
 import re
 import socket
 import ssl
+import time
 from dataclasses import dataclass
 from urllib.parse import quote, urljoin, urlsplit
 
@@ -28,6 +29,7 @@ class FetchError(Exception):
 
 MIN_WORDS = 150
 TIMEOUT_S = 20
+MAX_FETCH_S = 60
 MAX_REDIRECTS = 5
 MAX_HTML_BYTES = 5 * 1024 * 1024
 MAX_PDF_BYTES = 20 * 1024 * 1024
@@ -44,6 +46,7 @@ _URL_SAFE = "/%:@!$&'()*+,;=-._~?"
 _CHARSET = re.compile(r"charset\s*=\s*[\"']?([A-Za-z0-9._:-]+)", re.I)
 _HTML_TYPES = frozenset({"text/html", "application/xhtml+xml"})
 _HTML_MARKERS = (b"<html", b"<!doctype", b"<head")
+_clock = time.monotonic                          # tests swap in a fake clock
 
 
 @dataclass(frozen=True)
@@ -158,13 +161,22 @@ def _sniff(ctype: str, head: bytes) -> str | None:
     return None
 
 
-def _read_capped(resp, head: bytes, cap: int, length: str | None) -> tuple[bytes, bool]:
+def _check_deadline(deadline: float) -> None:
+    # TIMEOUT_S bounds each socket operation; this bounds the whole fetch, so
+    # a server trickling a byte every few seconds cannot hold a worker
+    if _clock() > deadline:
+        raise FetchError(f"fetch exceeded the {MAX_FETCH_S}s deadline")
+
+
+def _read_capped(resp, head: bytes, cap: int, length: str | None,
+                 deadline: float) -> tuple[bytes, bool]:
     try:
         declared = int(length) if length else None
     except ValueError:
         declared = None
     chunks, total = [head[:cap]], min(len(head), cap)
     while total < cap:
+        _check_deadline(deadline)
         chunk = resp.read(min(_CHUNK, cap - total))
         if not chunk:
             return b"".join(chunks), False
@@ -174,25 +186,30 @@ def _read_capped(resp, head: bytes, cap: int, length: str | None) -> tuple[bytes
     return b"".join(chunks), capped
 
 
-def _read(resp, status: int, url: str, host: str) -> Fetched:
+def _read(resp, status: int, url: str, host: str, deadline: float) -> Fetched:
     header = resp.getheader("Content-Type") or ""
     ctype = header.split(";", 1)[0].strip().lower()
     match = _CHARSET.search(header)
     charset = match.group(1) if match else "utf-8"
+    encoding = (resp.getheader("Content-Encoding") or "").strip().lower()
+    if encoding and encoding != "identity":  # sent despite Accept-Encoding: identity
+        return Fetched(status, url, host, None, charset=charset)
     head = resp.read(_SNIFF_BYTES)          # decide before reading the rest
     fmt = _sniff(ctype, head)
     if fmt is None:
         return Fetched(status, url, host, None, charset=charset)
     cap = MAX_PDF_BYTES if fmt == "pdf" else MAX_HTML_BYTES
-    data, capped = _read_capped(resp, head, cap, resp.getheader("Content-Length"))
+    data, capped = _read_capped(resp, head, cap, resp.getheader("Content-Length"), deadline)
     return Fetched(status, url, host, fmt, data, capped, charset)
 
 
 def _fetch(url: str, resolver, connector) -> Fetched:
     """One GET with redirect following; every hop re-runs the scheme and
     address checks before any connection is made."""
+    deadline = _clock() + MAX_FETCH_S
     current = url
     for _hop in range(MAX_REDIRECTS + 1):
+        _check_deadline(deadline)
         scheme, host, port, path = _target(current)
         ip = _check_host(host, port, resolver)
         conn = None
@@ -211,7 +228,7 @@ def _fetch(url: str, resolver, connector) -> Fetched:
                 raise FetchError(f"http {status} from {host}")
             if 400 <= status < 500 and status not in _PARTIAL_HTTP:
                 return Fetched(status, current, host, None)
-            return _read(resp, status, current, host)
+            return _read(resp, status, current, host, deadline)
         except (OSError, http.client.HTTPException) as e:
             raise FetchError(f"fetch failed for {host}: {e}") from e
         finally:
