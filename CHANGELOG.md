@@ -12,6 +12,8 @@
   from the article path.
 - Add the `partial` note status for pages that could only be read in part.
   These notes are written once, without retries.
+- Summarize capped pages (HTML over 5 MB, PDFs over 300 pages) from the text
+  that was read, marked `extraction: partial`.
 - Protect generic fetches against SSRF: http and https only, public addresses
   only on every redirect, connections pinned to the checked address, no
   cookies, and time, size, and page limits (20 seconds per network operation,

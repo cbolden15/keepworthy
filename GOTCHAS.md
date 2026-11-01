@@ -50,3 +50,6 @@
 - **Article fetch deadline:** `MAX_FETCH_S` (60 s) bounds a whole fetch on top
   of the 20 s per-operation `TIMEOUT_S`. Over HTTPS the worst case is about
   80 s.
+- **Extraction CPU time is unbounded:** the 60 s fetch deadline covers the
+  network read only. HTML parsing and PDF text extraction run after it with no
+  time limit.

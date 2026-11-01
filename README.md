@@ -81,7 +81,7 @@ Full extraction needs an optional, hash-pinned extra (trafilatura for HTML,
 pypdf for PDF). Install it into the interpreter or venv that runs `src.poll`:
 
 ```sh
-python3.12 -m pip install --require-hashes --only-binary=:all: -r requirements-capture.lock
+python3.12 -m pip install --require-hashes --only-binary=:all: -r requirements-capture.txt
 ```
 
 The extra keeps its dependencies' own licenses: trafilatura is Apache-2.0,
@@ -98,23 +98,38 @@ Notes from this path carry three more frontmatter keys after `type`:
 - `word_count`: words in the extracted text
 - `source_format`: `html` or `pdf`
 
+A capped page is summarized from the text that was read. That applies to HTML
+over the 5 MB size cap and to a PDF over 300 pages, where the first 300 pages
+are the text. The note is marked `extraction: partial`, and the source text
+callout says where the text stops. The capped text still needs 150 words;
+below that, the page is handled like the other partial reads below.
+
 A page that can't be read in full goes through the media tools next, in case
 it is mostly an embedded video. That covers paywalled or login pages, other
-HTTP 4xx responses, pages under 150 words, size caps, encrypted PDFs, HTML or
-PDF text the extractor can't parse, and responses sent with a
-`Content-Encoding` other than `identity`, which Keepworthy treats as
-unsupported. If the media tools find nothing, Keepworthy writes a short note
-with `status: "partial"` right away instead of retrying, so a paywalled
+HTTP 4xx responses, pages under 150 words, PDFs over the 20 MB size cap,
+encrypted PDFs, HTML or PDF text the extractor can't parse, and responses
+sent with a `Content-Encoding` other than `identity`, which Keepworthy treats
+as unsupported. If the media tools find nothing, Keepworthy writes a short
+note with `status: "partial"` right away instead of retrying, so a paywalled
 article gives you a partial note by design. Search for that status to find
 them. Sharing the same link again later rewrites that note.
 
-Fetch limits: only `http` and `https`. Every address a host resolves to, on
-every redirect, has to be public; private, loopback, link-local, CGNAT, and
-cloud metadata addresses are refused and filed as `invalid`. The connection
-goes to the address that was checked. No cookies or credentials are sent.
-Each network operation gets 20 seconds and a whole fetch gets 60 seconds
-(over HTTPS the worst case is about 80 seconds). A fetch follows at most 5
-redirects and reads at most 5 MB of HTML, or 20 MB and 300 pages of PDF.
+A 5xx response or a timeout is different: Keepworthy retries it on later runs
+up to `MAX_ATTEMPTS`, then writes a `fetch-failed` note.
+
+Fetch limits for the article reader: only `http` and `https`. Every address a
+host resolves to, on every redirect, has to be public; private, loopback,
+link-local, CGNAT, and cloud metadata addresses are refused and filed as
+`invalid`. The connection goes to the address that was checked. No cookies or
+credentials are sent. Each network operation gets 20 seconds and a whole
+fetch gets 60 seconds (over HTTPS the worst case is about 80 seconds). A fetch
+follows at most 5 redirects and reads at most 5 MB of HTML, or 20 MB and 300
+pages of PDF.
+
+These checks cover the article reader only. When a share falls back to the
+media tools (a partial read other than capped text, or an unsupported type),
+the existing fallback runs as before: a page metadata fetch and yt-dlp, with
+the configured cookie file and without the article reader's address checks.
 
 ## Optional private media and finance
 
