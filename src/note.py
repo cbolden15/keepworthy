@@ -269,6 +269,9 @@ def _social_frontmatter(post_meta: dict, model_meta: dict, status: str, processe
     source_type = post_meta.get("source_type") or ("web" if platform == "generic" else "social")
     content_kind = post_meta.get("content_kind") or model_meta.get("content_kind") or "other"
     tags = [platform] + [t for t in model_meta.get("tags", []) if t != platform]
+    for tag in post_meta.get("import_tags") or []:      # an imported bookmark's folder and tags
+        if tag not in tags:
+            tags.append(tag)
     kind = post_meta.get("kind", "text")
     if kind is None:
         kind = "text"

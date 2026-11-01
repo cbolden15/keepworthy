@@ -1390,3 +1390,173 @@ def test_generic_text_path_model_failure_keeps_article_body(tmp_path):
     assert 'status: "summary-failed"' in _only_note(tmp_path)
     [record] = _saved(tmp_path)
     assert (record["fetch_status"], record["body"]) == ("complete", text)
+
+
+
+# ---- imported bookmarks ----------------------------------------------------------
+
+import logging
+
+
+def _import_item(url="https://example.com/bookmark", **over):
+    """A queue item the way importer.drip appends it."""
+    item = {"url": url, "why": "Imported from Pocket. Tags: python.", "text": None,
+            "received_at": "2026-11-01T08:00:00+00:00", "capture_source": "import",
+            "import_title": "Bookmark title", "import_folder": "Reading/Infra",
+            "import_tags": ["python", "second brain"],
+            "import_saved_at": "2024-03-09T12:34:56+00:00", "import_source": "pocket"}
+    item.update(over)
+    return item
+
+
+_LONG_TEXT = " ".join(f"w{i}" for i in range(300))
+
+
+def _frontmatter(tmp_path):
+    return _only_note(tmp_path).split("---")[1]
+
+
+def test_import_capture_source_in_frontmatter(tmp_path):
+    cfg = _cfg(tmp_path)
+    deps = _deps(fetch_article=lambda url, **kw: _art(_LONG_TEXT))
+    assert _process(cfg, tmp_path, _import_item(), "2026-11-01", deps) == "summarized"
+    fm = _frontmatter(tmp_path)
+    assert 'capture_source: "import"' in fm
+    assert 'capture_why: "Imported from Pocket. Tags: python."' in fm
+
+
+def test_import_title_fallback_when_page_has_none(tmp_path):
+    cfg = _cfg(tmp_path)
+    deps = _deps(fetch_article=lambda url, **kw: _art(_LONG_TEXT, title=""))
+    assert _process(cfg, tmp_path, _import_item(), "2026-11-01", deps) == "summarized"
+    assert 'title: "Bookmark title"' in _frontmatter(tmp_path)
+
+
+def test_page_title_beats_import_title(tmp_path):
+    cfg = _cfg(tmp_path)
+    deps = _deps(fetch_article=lambda url, **kw: _art(_LONG_TEXT))
+    assert _process(cfg, tmp_path, _import_item(), "2026-11-01", deps) == "summarized"
+    assert 'title: "A Long Read"' in _frontmatter(tmp_path)
+
+
+def test_import_folder_and_tags_become_note_tags(tmp_path):
+    cfg = _cfg(tmp_path)
+    deps = _deps(fetch_article=lambda url, **kw: _art(_LONG_TEXT))
+    assert _process(cfg, tmp_path, _import_item(), "2026-11-01", deps) == "summarized"
+    assert 'tags: ["generic", "x", "Reading", "Infra", "python", "second-brain"]' in \
+        _frontmatter(tmp_path)
+
+
+def test_import_date_falls_back_to_saved_at(tmp_path):
+    cfg = _cfg(tmp_path)
+    deps = _deps(fetch_article=lambda url, **kw: _art(_LONG_TEXT, date=""))
+    assert _process(cfg, tmp_path, _import_item(), "2026-11-01", deps) == "summarized"
+    assert 'date: "2024-03-09"' in _frontmatter(tmp_path)
+
+
+def test_import_fetch_failed_stub_carries_bookmark_fields(tmp_path):
+    cfg = _cfg(tmp_path, MAX_ATTEMPTS=1)
+
+    def down(url, **kw):
+        raise article.FetchError("timed out")
+    deps = _deps(fetch_article=down, fetch_social_media=_never, fetch_page_text=_never)
+    assert _process(cfg, tmp_path, _import_item(), "2026-11-01", deps) == "fetch-failed"
+    fm = _frontmatter(tmp_path)
+    assert 'status: "fetch-failed"' in fm and 'capture_source: "import"' in fm
+    assert 'title: "Bookmark title"' in fm and 'date: "2024-03-09"' in fm
+    assert 'tags: ["generic", "Reading", "Infra", "python", "second-brain"]' in fm
+
+
+def test_live_share_note_unchanged(tmp_path, monkeypatch):
+    # pinned from the processor before bookmark import existed
+    monkeypatch.setattr(note_mod, "now_stamp", lambda: "2026-11-01T09:00:00")
+    cfg = _cfg(tmp_path)
+    item = {"url": "https://www.instagram.com/reel/A/", "text": "shared words",
+            "why": "Adapt this hook.", "received_at": "2026-11-01T08:00:00+00:00"}
+    assert _process(cfg, tmp_path, item, "2026-11-01", _deps()) == "summarized"
+    [path] = list((tmp_path / "vault").rglob("*.md"))
+    assert path.relative_to(tmp_path / "vault") == \
+        Path("saved-content/AI & Dev/General/2026-11-01 T (Instagram).md")
+    assert path.read_text() == (
+        '---\ntitle: "T"\nplatform: "instagram"\nsource_type: "social"\ncontent_kind: "post"\n'
+        'author: "@a"\nurl: "https://www.instagram.com/reel/A/"\nitem_key: ""\n'
+        'date: "2026-07-01"\nprocessed: 2026-11-01\nprocessed_at: 2026-11-01T09:00:00\n'
+        'capture_why: "Adapt this hook."\ncapture_context_at: "2026-11-01T08:00:00+00:00"\n'
+        'capture_source: "share"\ntype: "video"\ncategory: "ai-dev"\ntopic: "AI & Dev"\n'
+        'subtopic: "General"\ntags: ["instagram", "x"]\nstatus: "summarized"\n---\n\n'
+        '## Why saved\nAdapt this hook.\n\n# N\nbody\n\n> [!note]- Full transcript\n'
+        '> spoken words\n')
+
+
+def _order_recording_deps(order):
+    def media(url, ck, td, **kw):
+        order.append(url)
+        return _video_media(url, ck, td)
+
+    def fetch(url, **kw):
+        order.append(url)
+        return _art(_LONG_TEXT)
+    return _deps(fetch_social_media=media, fetch_article=fetch)
+
+
+def test_drain_sorts_imports_behind_live_shares(tmp_path):
+    shares = ["https://www.instagram.com/reel/S1/", "https://www.instagram.com/reel/S2/"]
+    imports = ["https://example.com/i1", "https://example.org/i2"]
+    batch = [_import_item(imports[0]), {"url": shares[0], "text": None},
+             _import_item(imports[1]), {"url": shares[1], "text": None}]
+    cfg = _cfg(tmp_path)
+    for item in batch:
+        append_item(cfg.queue_path, item)
+    order = []
+    drain_social_queue(cfg, tmp_path, "2026-11-01", deps=_order_recording_deps(order))
+    assert order == [shares[0], shares[1], imports[0], imports[1]]
+
+    limited = tmp_path / "limited"
+    limited.mkdir()
+    cfg = _cfg(limited, SOCIAL_BATCH_SIZE=2)
+    for item in batch:
+        append_item(cfg.queue_path, item)
+    order = []
+    results = drain_social_queue(cfg, limited, "2026-11-01", deps=_order_recording_deps(order))
+    assert order == shares
+    assert results == [(shares[0], "summarized"), (shares[1], "summarized")]
+    assert [i["url"] for i in ingest._read_items(cfg.queue_path)] == imports
+
+
+def test_saved_feed_capture_source_still_passes_through(tmp_path):
+    cfg = _cfg(tmp_path)
+    item = {"url": "https://www.instagram.com/reel/A/", "text": None,
+            "capture_source": "saved_feed"}
+    assert _process(cfg, tmp_path, item, "2026-11-01", _deps()) == "summarized"
+    assert 'capture_source: "saved_feed"' in _frontmatter(tmp_path)
+
+
+def test_unknown_capture_source_is_a_share(tmp_path):
+    cfg = _cfg(tmp_path)
+    item = {"url": "https://www.instagram.com/reel/A/", "text": None, "capture_source": ["x"]}
+    assert _process(cfg, tmp_path, item, "2026-11-01", _deps()) == "summarized"
+    assert 'capture_source: "share"' in _frontmatter(tmp_path)
+
+
+def test_drain_returns_key_as_label_for_imports(tmp_path):
+    cfg = _cfg(tmp_path)
+    share = "https://www.instagram.com/reel/A/"
+    bookmark = "https://example.com/bookmark"
+    append_item(cfg.queue_path, _import_item(bookmark))
+    append_item(cfg.queue_path, {"url": share, "text": None})
+    results = drain_social_queue(cfg, tmp_path, "2026-11-01",
+                                 deps=_deps(fetch_article=lambda url, **kw: _art(_LONG_TEXT)))
+    assert results == [(share, "summarized"), (url_key(bookmark), "summarized")]
+    assert url_key(bookmark).startswith("url:")
+
+
+def test_poll_log_line_unchanged_for_shares(tmp_path, monkeypatch, caplog):
+    from src import poll
+    from tests.test_poll import _stub_main_config
+    monkeypatch.setattr(poll, "run", lambda cfg, root, processed, deps: [])
+    monkeypatch.setattr(social, "drain_social_queue",
+                        lambda cfg, root, processed: [("https://example.org/a", "summarized")])
+    _stub_main_config(monkeypatch, tmp_path)
+    with caplog.at_level(logging.INFO, logger="yt-obsidian"):
+        poll.main()
+    assert "social https://example.org/a → summarized" in caplog.messages
