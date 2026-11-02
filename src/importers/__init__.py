@@ -26,8 +26,9 @@ SNIFF_BYTES = 64 * 1024
 SOURCES = ("netscape", "pocket", "raindrop")   # sniff order and --format choices
 SOURCE_LABELS = {"netscape": "browser bookmarks", "pocket": "Pocket", "raindrop": "Raindrop"}
 
-# C0, DEL, C1, then zero-width marks and bidi overrides (reorder how a title prints)
-_CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
+# C0, DEL, C1, then zero-width marks and bidi overrides (reorder how a title prints);
+# ZWNJ and ZWJ stay, since Persian, Indic scripts and emoji sequences need them
+_CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u200b\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
 _SPACE = re.compile(r"\s+")
 _DIGITS = re.compile(r"[0-9]+")
 _EARLIEST = datetime(1990, 1, 1, tzinfo=timezone.utc)
@@ -135,7 +136,7 @@ class Collector:
             self.bad()
             return
         scheme = parts.scheme.lower()
-        if scheme in ("http", "https") and not parts.netloc:
+        if scheme in ("http", "https") and not parts.hostname:
             self.bad()
             return
         self.found += 1

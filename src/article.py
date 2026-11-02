@@ -134,7 +134,7 @@ def _check_host(host: str, port: int, resolver) -> str:
             infos = resolver(host, port, type=socket.SOCK_STREAM)
         except (OSError, UnicodeError) as e:
             if isinstance(e, socket.gaierror) and e.errno in _NO_SUCH_HOST:
-                raise NoSuchHost(f"no such host {host}: {e}") from e
+                raise NoSuchHost(f"could not resolve {host}: {e}") from e
             raise FetchError(f"could not resolve {host}: {e}") from e
         addresses = [ipaddress.ip_address(str(info[4][0]).split("%", 1)[0]) for info in infos]
     if not addresses:

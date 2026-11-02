@@ -203,9 +203,11 @@ def test_netscape_folders_below_the_cap_are_unchanged_after_deep_close(tmp_path)
     assert netscape.parse(path).bookmarks[0].folder == "top"
 
 
-@pytest.mark.parametrize("url", ["https://", "http:foo", "https:///path",
+@pytest.mark.parametrize("url", ["https://", "http:foo", "https:///path", "https://:80/",
+                                 "https://user@/",
                                  "https://example.com/" + "a" * importers.MAX_URL],
-                         ids=["no-host", "no-slashes", "empty-authority", "too-long"])
+                         ids=["no-host", "no-slashes", "empty-authority", "port-only",
+                              "userinfo-only", "too-long"])
 def test_collector_counts_hostless_and_oversized_urls_as_bad(url):
     collector = importers.Collector("netscape", 10)
     collector.add(url)
@@ -232,6 +234,12 @@ def test_netscape_unclosed_anchor_before_next_anchor_is_counted(tmp_path):
 
 def test_sanitize_strips_bidi_and_zero_width_characters():
     assert sanitize_text("a‮b‪c⁦d⁩e​f‏g﻿h", 50) == "abcdefgh"
+
+
+def test_sanitize_keeps_joiners_and_non_joiners():
+    # U+200C is part of Persian and Indic spelling, U+200D joins emoji sequences
+    assert sanitize_text("a\u200cb\u200dc", 50) == "a\u200cb\u200dc"
+    assert sanitize_text("a\u200bb\u200ec\u200fd\ufeffe", 50) == "abcde"
 
 
 def test_sanitize_has_no_trailing_space_after_cut():

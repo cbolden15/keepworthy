@@ -730,6 +730,7 @@ def test_missing_host_raises_no_such_host(errno):
     with pytest.raises(article.NoSuchHost) as err:
         article._fetch("https://example.com/", resolver, FakeNet().connector)
     assert isinstance(err.value, FetchError)
+    assert str(err.value).startswith("could not resolve example.com: ")   # the text a share always had
 
 
 @pytest.mark.parametrize("error", [socket.gaierror(socket.EAI_AGAIN, "temporary failure"),

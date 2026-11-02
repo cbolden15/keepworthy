@@ -158,6 +158,24 @@ def test_poll_main_drips_between_youtube_and_social(monkeypatch, tmp_path, caplo
     assert "import drip: enqueued 3 (sent today 3, waiting 0, limit 20)" in caplog.messages
 
 
+def test_poll_main_closes_the_ledger_after_the_drip(monkeypatch, tmp_path):
+    _main_config(monkeypatch, tmp_path)
+    importer.open_ledger(tmp_path / "state" / "import.db").close()
+    held = []
+    real_drip = importer.drip
+
+    def drip(db, *args, **kwargs):
+        held.append(db)
+        return real_drip(db, *args, **kwargs)
+    monkeypatch.setattr(importer, "drip", drip)
+    monkeypatch.setattr(poll, "run", lambda c, root, processed, deps: [])
+    monkeypatch.setattr(social, "drain_social_queue", lambda c, root, processed: [])
+    poll.main()
+    [db] = held
+    with pytest.raises(sqlite3.ProgrammingError):
+        db.execute("SELECT 1")
+
+
 def test_poll_main_drip_failure_does_not_block_social_drain(monkeypatch, tmp_path, caplog):
     _main_config(monkeypatch, tmp_path)
     importer.open_ledger(tmp_path / "state" / "import.db").close()

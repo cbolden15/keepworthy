@@ -16,6 +16,7 @@ import math
 import os
 import re
 import sqlite3
+import stat
 import sys
 from contextlib import closing, contextmanager
 from datetime import date, datetime, timezone
@@ -225,7 +226,8 @@ def status(db, limit: int, now=None) -> dict:
 def cancel(db, import_id: int, *, yes: bool) -> int:
     """The number of this import's unsent rows. With yes=True, in one
     transaction, the import is marked cancelled and those rows are deleted;
-    sent rows stay, so they keep deduping a later re-import."""
+    sent rows stay, so they keep deduping a later re-import. A drip that has
+    already picked up rows can still send them."""
     if not yes:
         return db.execute("SELECT COUNT(*) FROM bookmarks WHERE import_id=? AND enqueued_at IS NULL",
                           (import_id,)).fetchone()[0]
@@ -282,9 +284,12 @@ def _cmd_import(cfg, args) -> int:
     prefix = _check_args(args)
     path = Path(args.file)
     try:
-        size = path.stat().st_size
+        info = path.stat()
     except FileNotFoundError:
         raise UsageError("the bookmark file does not exist") from None
+    if not stat.S_ISREG(info.st_mode):      # a directory or FIFO would create the ledger, or hang
+        raise UsageError("the bookmark file is not a regular file")
+    size = info.st_size
     if size > importers.MAX_FILE_BYTES:
         raise UsageError(f"file is {size / (1024 * 1024):.1f} MB; the limit is "
                          f"{importers.MAX_FILE_BYTES // (1024 * 1024)} MB")

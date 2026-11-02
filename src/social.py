@@ -9,7 +9,7 @@ import socket
 import subprocess
 import tempfile
 from functools import partial
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit
@@ -389,16 +389,36 @@ def _article_fields(art: dict) -> dict:
             "source_format": art["source_format"], "extraction_reason": art["reason"]}
 
 
+_MISSING_HOST_WAIT = timedelta(days=1)    # macOS reports every host missing while offline
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _missing_for_a_day(item) -> bool:
+    """Stamp an import's first NoSuchHost on the item; True once a day has passed."""
+    now = _utc_now()
+    since = item.setdefault("import_missing_since", now.isoformat())
+    try:
+        return now - datetime.fromisoformat(since) >= _MISSING_HOST_WAIT
+    except (TypeError, ValueError):
+        item["import_missing_since"] = now.isoformat()
+        return False
+
+
 def _article_fetch_failed(cfg, item, url, key, shared_text, processed, deps, err, *,
                           label, dead=False) -> str:
     """The retry policy of an empty media fetch, without the media tools:
     yt-dlp against a host that just timed out burns minutes for nothing.
-    dead: an imported bookmark whose host does not exist ends as dead-link."""
+    dead: an imported bookmark whose host does not exist ends as dead-link, once
+    the host has stayed missing for a day as well as for max_attempts tries."""
     attempts = state.record_attempt(cfg.state_path, key)
     # an import's error text can name its host or url; log only the type
     log.warning("article fetch failed for %s (attempt %d): %s", label, attempts,
                 type(err).__name__ if _is_import(item) else err)
-    if attempts < cfg.max_attempts:
+    held = dead and not _missing_for_a_day(item)        # stamps the first miss
+    if attempts < cfg.max_attempts or held:
         return "retry"
     post_meta = _import_post_meta(item, {**_bare_post_meta(url), **_capture_fields(item)})
     _emit_saved_item(cfg, item, post_meta, key, "failed")
@@ -512,8 +532,9 @@ def process_social_item(cfg, project_root, item, processed, deps, key, prompt_te
             art = (deps.fetch_article(url, log_url=False) if _is_import(item)
                    else deps.fetch_article(url))
         except article.BlockedURL as e:
-            log.warning("refused %s: %s", label, e)
-            return _write_stub(cfg, {**_bare_post_meta(url), **_capture_fields(item)}, key,
+            log.warning("refused %s: %s", label, type(e).__name__ if _is_import(item) else e)
+            meta = _import_post_meta(item, {**_bare_post_meta(url), **_capture_fields(item)})
+            return _write_stub(cfg, meta, key,
                                "invalid", shared_text, processed, deps, reason=_REFUSED_REASON)
         except article.FetchError as e:
             return _article_fetch_failed(
@@ -573,7 +594,7 @@ def process_social_item(cfg, project_root, item, processed, deps, key, prompt_te
                     transcript = deps.transcribe_audio(media["files"][0],
                                                        cfg.gemini_api_key, cfg.gemini_model)
                 except gemini.TranscribeError as e:
-                    log.warning("transcription failed for %s: %s", label, e)
+                    log.warning("transcription failed for %s: %s", label, type(e).__name__ if _is_import(item) else e)
         elif media["kind"] == "images":
             images = media["files"]
         if not text_path and (media["kind"] == "none"
@@ -581,7 +602,7 @@ def process_social_item(cfg, project_root, item, processed, deps, key, prompt_te
             try:
                 page = deps.fetch_page_text(url, cfg.cookies_path)
             except FetchError as e:
-                log.info("page fetch failed for %s: %s", label, e)
+                log.info("page fetch failed for %s: %s", label, type(e).__name__ if _is_import(item) else e)
 
         post_meta = {
             "platform": platform, "url": url,
@@ -642,7 +663,8 @@ def process_social_item(cfg, project_root, item, processed, deps, key, prompt_te
                                              cfg.model, project_root) if not free else deps.run_claude_social(prompt_text,payload,[],cfg.model,project_root)
         except Exception as e:               # claude failure → retry policy
             attempts = state.record_attempt(cfg.state_path, key)
-            log.warning("social summarize failed for %s (attempt %d): %s", label, attempts, e)
+            log.warning("social summarize failed for %s (attempt %d): %s", label, attempts,
+                        type(e).__name__ if _is_import(item) else e)
             if attempts >= cfg.max_attempts:
                 _emit_fetched_saved_item(cfg, item, post_meta, key, media, page, transcript,
                                          article_text=article_text)
@@ -744,7 +766,8 @@ def drain_social_queue(cfg, project_root, processed, deps=None) -> list:
             # attempt is what bounds it: without that the item never reaches
             # max_attempts and re-runs the whole pipeline every cycle forever.
             attempts, e = _count_attempt(cfg, key, e)
-            log.error("unexpected error on %s (attempt %d): %s", label, attempts, e)
+            log.error("unexpected error on %s (attempt %d): %s", label, attempts,
+                      type(e).__name__ if _is_import(item) else e)
             if attempts >= cfg.max_attempts:
                 bare = _bare_post_meta(url)
                 if _is_import(item):     # the same capture fields and fallbacks as other import stubs

@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from src.social import (
@@ -1600,21 +1602,63 @@ def test_import_410_is_dead_link_at_once(tmp_path):
     assert 'status: "dead-link"' in _frontmatter(tmp_path)
 
 
-def test_import_no_such_host_retries_then_dead_link(tmp_path):
-    cfg = _cfg(tmp_path, MAX_ATTEMPTS=3)
+_NOW = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)
 
-    def missing(url, **kw):
-        raise article.NoSuchHost("no such host")
+
+def _missing_host(url, **kw):
+    raise article.NoSuchHost("no such host")
+
+
+def test_import_no_such_host_stamps_the_first_miss(tmp_path, monkeypatch):
+    monkeypatch.setattr(social, "_utc_now", lambda: _NOW)
+    cfg = _cfg(tmp_path, MAX_ATTEMPTS=3)
+    item = _import_item()
+    assert _process(cfg, tmp_path, item, "2026-11-01", _dead_link_deps(_missing_host)) == "retry"
+    assert item["import_missing_since"] == _NOW.isoformat()
+    later = _NOW + timedelta(hours=2)
+    monkeypatch.setattr(social, "_utc_now", lambda: later)
+    assert _process(cfg, tmp_path, item, "2026-11-01", _dead_link_deps(_missing_host)) == "retry"
+    assert item["import_missing_since"] == _NOW.isoformat()      # the first miss stays
+
+
+def test_import_no_such_host_waits_a_day_then_dead_link(tmp_path, monkeypatch):
+    monkeypatch.setattr(social, "_utc_now", lambda: _NOW)
+    cfg = _cfg(tmp_path, MAX_ATTEMPTS=3)
     item = _import_item()
     key = url_key(item["url"])
-    deps = _dead_link_deps(missing)
+    deps = _dead_link_deps(_missing_host)
     assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "retry"
     assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "retry"
     assert state_mod.load_state(cfg.state_path)["attempts"][key] == 2
     assert not (tmp_path / "vault").exists()
+    # MAX_ATTEMPTS is reached, but the host has only been missing for moments
+    assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "retry"
+    assert not (tmp_path / "vault").exists()
+    item["import_missing_since"] = (_NOW - timedelta(hours=23)).isoformat()
+    assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "retry"
+    item["import_missing_since"] = (_NOW - timedelta(hours=25)).isoformat()
     assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "dead-link"
     fm = _frontmatter(tmp_path)
     assert 'status: "dead-link"' in fm and 'title: "Bookmark title"' in fm
+
+
+def test_requeued_import_keeps_the_missing_stamp(tmp_path, monkeypatch):
+    monkeypatch.setattr(social, "_utc_now", lambda: _NOW)
+    cfg = _cfg(tmp_path, MAX_ATTEMPTS=3)
+    append_item(cfg.queue_path, _import_item())
+    results = drain_social_queue(cfg, tmp_path, "2026-11-01", _dead_link_deps(_missing_host))
+    assert [outcome for _, outcome in results] == ["retry"]
+    [line] = Path(cfg.queue_path).read_text().splitlines()
+    assert json_mod.loads(line)["import_missing_since"] == _NOW.isoformat()
+
+
+@pytest.mark.parametrize("since", ["not a date", None, 7, "2026-10-01T00:00:00"])
+def test_import_unusable_missing_stamp_restarts_the_wait(tmp_path, monkeypatch, since):
+    monkeypatch.setattr(social, "_utc_now", lambda: _NOW)
+    cfg = _cfg(tmp_path, MAX_ATTEMPTS=1)
+    item = _import_item(import_missing_since=since)
+    assert _process(cfg, tmp_path, item, "2026-11-01", _dead_link_deps(_missing_host)) == "retry"
+    assert item["import_missing_since"] == _NOW.isoformat()
 
 
 def test_import_other_resolver_error_is_fetch_failed(tmp_path):
@@ -1648,6 +1692,7 @@ def test_live_share_no_such_host_is_still_fetch_failed(tmp_path):
     assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "retry"
     assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "fetch-failed"
     assert 'status: "fetch-failed"' in _frontmatter(tmp_path)
+    assert "import_missing_since" not in item
 
 
 def test_no_import_url_in_logs(tmp_path, monkeypatch, caplog):
@@ -1729,5 +1774,90 @@ def test_import_unexpected_error_stub_carries_bookmark_fields(tmp_path):
     fm = _frontmatter(tmp_path)
     assert 'status: "summary-failed"' in fm and 'capture_source: "import"' in fm
     assert 'capture_why: "Imported from Pocket. Tags: python."' in fm
+    assert 'title: "Bookmark title"' in fm and 'date: "2024-03-09"' in fm
+    assert 'tags: ["generic", "Reading", "Infra", "python", "second-brain"]' in fm
+
+
+# ---- item-level error lines: an import logs the error type, a share keeps its text ----
+
+_RAW = "https://www.instagram.com/reel/A/ failed with details"
+
+
+def _logged(caplog, cfg, tmp_path, item, deps, *, drain=False):
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="yt-obsidian"):
+        if drain:
+            append_item(cfg.queue_path, item)
+            drain_social_queue(cfg, tmp_path, "2026-11-01", deps)
+        else:
+            _process(cfg, tmp_path, item, "2026-11-01", deps)
+    return caplog.messages
+
+
+def _error_case(case):
+    """(url, deps overrides, expected line for a share with message {raw}, error type)."""
+    def blocked(url, **kw):
+        raise article.BlockedURL("intranet.example.com resolves to a disallowed address (10.0.0.1)")
+
+    def no_transcript(p, k, m):
+        raise gemini.TranscribeError(_RAW)
+
+    def no_page(url, ck):
+        raise FetchError(_RAW)
+
+    def no_claude(*a, **k):
+        raise RuntimeError(_RAW)
+
+    def no_note(*a, **k):
+        raise RuntimeError(_RAW)
+    insta = "https://www.instagram.com/reel/A/"
+    return {
+        "refused": ("https://intranet.example.com/admin", dict(fetch_article=blocked),
+                    "refused {label}: {text}", "BlockedURL",
+                    "intranet.example.com resolves to a disallowed address (10.0.0.1)"),
+        "transcription": (insta, dict(transcribe_audio=no_transcript,
+                                      fetch_page_text=lambda url, ck: {"title": "", "text": "x",
+                                                                      "author": ""}),
+                          "transcription failed for {label}: {text}", "TranscribeError", _RAW),
+        "page": (insta, dict(fetch_social_media=_no_media, fetch_page_text=no_page),
+                 "page fetch failed for {label}: {text}", "FetchError", _RAW),
+        "summarize": (insta, dict(run_claude_social=no_claude),
+                      "social summarize failed for {label} (attempt 1): {text}",
+                      "RuntimeError", _RAW),
+        "unexpected": (insta, dict(build_social_note=no_note),
+                       "unexpected error on {label} (attempt 1): {text}", "RuntimeError", _RAW),
+    }[case]
+
+
+@pytest.mark.parametrize("case", ["refused", "transcription", "page", "summarize", "unexpected"])
+def test_import_error_lines_log_only_the_type(tmp_path, caplog, case):
+    cfg = _cfg(tmp_path, MAX_ATTEMPTS=3)
+    url, over, template, error_type, text = _error_case(case)
+    item = _import_item(url)
+    key = url_key(url)
+    messages = _logged(caplog, cfg, tmp_path, item, _deps(**over), drain=case == "unexpected")
+    assert template.format(label=key, text=error_type) in messages
+    assert [m for m in messages if "instagram.com" in m or "intranet" in m or "10.0.0.1" in m] == []
+
+
+@pytest.mark.parametrize("case", ["refused", "transcription", "page", "summarize", "unexpected"])
+def test_share_error_lines_unchanged(tmp_path, caplog, case):
+    cfg = _cfg(tmp_path, MAX_ATTEMPTS=3)
+    url, over, template, error_type, text = _error_case(case)
+    item = {"url": url, "text": None}
+    messages = _logged(caplog, cfg, tmp_path, item, _deps(**over), drain=case == "unexpected")
+    assert template.format(label=url, text=text) in messages
+
+
+def test_refused_import_stub_keeps_the_bookmark_fields(tmp_path):
+    cfg = _cfg(tmp_path)
+
+    def blocked(url, **kw):
+        raise article.BlockedURL("intranet.example.com resolves to a disallowed address (10.0.0.1)")
+    deps = _deps(fetch_article=blocked, fetch_social_media=_never, fetch_page_text=_never)
+    item = _import_item("https://intranet.example.com/admin")
+    assert _process(cfg, tmp_path, item, "2026-11-01", deps) == "invalid"
+    fm = _frontmatter(tmp_path)
+    assert 'status: "invalid"' in fm and 'capture_source: "import"' in fm
     assert 'title: "Bookmark title"' in fm and 'date: "2024-03-09"' in fm
     assert 'tags: ["generic", "Reading", "Infra", "python", "second-brain"]' in fm

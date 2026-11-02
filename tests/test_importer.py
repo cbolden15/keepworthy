@@ -379,10 +379,21 @@ def test_cancel_takes_the_lock(tmp_path, monkeypatch, capsys):
     assert _count(cfg, "bookmarks") == 4
 
 
+def test_import_rejects_a_directory_before_creating_anything(tmp_path, monkeypatch, capsys):
+    cfg = _cfg(tmp_path, monkeypatch)
+    code, out, err = _run(capsys, "import", tmp_path)
+    assert code == 2 and "not a regular file" in err
+    assert not cfg.import_db_path.exists()
+    assert not Path(f"{cfg.import_db_path}.lock").exists()
+    assert not cfg.import_db_path.parent.exists()
+
+
 def test_status_counts_and_days_remaining(tmp_path, monkeypatch, capsys):
     cfg = _cfg(tmp_path, monkeypatch, "IMPORT_DAILY_LIMIT=1\n")
     assert _run(capsys, "import", FIXTURES / "pocket.csv")[0] == 0
-    yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+    fixed = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)     # the real clock can cross 00:00 UTC
+    monkeypatch.setattr(importer, "_utc_now", lambda now=None: (now or fixed).astimezone(timezone.utc))
+    yesterday = fixed - timedelta(days=1)
     assert _drip(cfg, 1, now=yesterday)["enqueued"] == 1
     assert _drip(cfg, 1)["enqueued"] == 1
     code, out, _err = _run(capsys, "status")
