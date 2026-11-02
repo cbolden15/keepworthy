@@ -182,29 +182,34 @@ will take at the current limit.
 
 `cancel <id>` prints how many unsent links that import still has.
 `cancel <id> --yes` deletes them and marks the import cancelled. Links that
-were already sent stay deduplicated. Importing the same file again does
-nothing while its import is active and prints the date and id of that import.
-After a cancel the file can be imported again, for example with narrower
-filters.
+were already sent stay deduplicated. A poll that is moving links into the
+queue at that moment can still send the links it already picked up. Importing
+the same file again does nothing while its import is active and prints the
+date and id of that import. After a cancel the file can be imported again, for
+example with narrower filters.
 
 Notes from an import carry `capture_source: "import"`. When the page gives no
 title or date, the bookmark's own title and save date fill in, and the
-bookmark's folder names and tags are added to the note's tags. A link whose
-page answers 404 or 410 becomes a short note with `status: "dead-link"` on the
-first try, with no model call. A host that no longer exists gets the usual
-`MAX_ATTEMPTS` retries before the same `dead-link` note.
+bookmark's folder names and tags are added to the note's tags. A web link (not
+Instagram, Facebook, Threads, X or YouTube) whose page answers 404 or 410
+becomes a short note with `status: "dead-link"` on the first try, with no
+model call. A host that no longer exists is retried for at least a day, and at
+least `MAX_ATTEMPTS` times, before the same `dead-link` note.
 
 An import file may be at most 50 MB and hold at most 50,000 bookmarks; over
 either, the import stops before writing anything. A link longer than 4,096
 characters, or an `http` link with no host, counts as a bad row. Folders
 nested deeper than 64 levels are cut at that depth, and the bookmarks inside
-are kept. The ledger is a local SQLite file, created owner-only (0600), holding the links, titles, folders, tags and
-notes from the file. The importer prints counts and the import id only. In
-the poll log an imported link appears by its dedupe key (`url:<sha1>`), and a
-failed fetch logs only the error type, so the link's URL and host stay out.
-Two lines can still name the URL: a yt-dlp or gallery-dl failure and a failed
-page metadata fetch. An imported link reaches them only after a partial read
-other than a 404 or 410.
+are kept.
+
+The ledger is a local SQLite file, created owner-only (0600), holding the
+links, titles, folders, tags and notes from the file. The importer prints
+counts and the import id only. In the poll log an imported link appears by its
+dedupe key (`url:<sha1>`), and a failure logs only the error type. One line can
+still name the URL: a yt-dlp or gallery-dl failure. Links to Instagram,
+Facebook, Threads, X and YouTube go to those tools first; other links reach
+them only when the page is an unsupported type or was read only in part, and
+not when it answered 404 or 410.
 
 ## Optional private media and finance
 

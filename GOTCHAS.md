@@ -64,3 +64,8 @@
 - **`fetch_page_text` has no opener:** it fetches through `article._fetch` now.
   The `cookies_path` and `opener` parameters are accepted and ignored so old
   callers keep working; tests pass `resolver` and `connector` fakes instead.
+- **A missing host may only mean offline:** macOS `getaddrinfo` returns
+  `EAI_NONAME` for every name while the machine is offline (glibc returns
+  `EAI_AGAIN`). An imported link therefore waits a day, as well as
+  `MAX_ATTEMPTS` tries, before a missing host becomes a `dead-link` note. The
+  first miss is stamped on the queue item as `import_missing_since`.

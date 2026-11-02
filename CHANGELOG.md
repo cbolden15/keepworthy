@@ -13,8 +13,8 @@
   save date fill in when the page has none, and its folder and tags become
   note tags.
 - Add the `dead-link` note status for imported links: HTTP 404 or 410 on the
-  first try, or a host that no longer exists after `MAX_ATTEMPTS`. No model
-  call is made for them.
+  first try, or a host that has stayed missing for at least a day and
+  `MAX_ATTEMPTS` tries. No model call is made for them.
 - Add the `IMPORT_DB_PATH` and `IMPORT_DAILY_LIMIT` settings.
 - Security: the fallback page fetch for media posts now goes through the
   article reader's address checks and sends no cookies, and yt-dlp and
