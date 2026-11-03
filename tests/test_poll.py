@@ -505,3 +505,39 @@ def test_main_logs_the_article_capture_mode(monkeypatch, tmp_path, caplog, mode,
     with caplog.at_level(logging.INFO, logger="yt-obsidian"):
         poll.main()
     assert line in caplog.messages
+
+
+def test_missing_yt_dlp_is_a_clear_setup_error(tmp_path):
+    import pytest
+    deps = base_deps()
+    def missing(url):
+        raise FileNotFoundError(2, "No such file or directory", "yt-dlp")
+    deps.list_playlist_ids = missing
+    with pytest.raises(poll.SetupError, match="yt-dlp is not on PATH"):
+        poll.run(make_cfg(tmp_path), tmp_path, "2026-07-20", deps)
+
+
+def test_unlistable_playlist_names_the_setting(tmp_path):
+    import subprocess
+    import pytest
+    deps = base_deps()
+    def fails(url):
+        raise subprocess.CalledProcessError(
+            1, ["yt-dlp"], stderr="WARNING: x\nERROR: [youtube:tab] PLnope: The playlist does not exist.\n")
+    deps.list_playlist_ids = fails
+    with pytest.raises(poll.SetupError) as exc:
+        poll.run(make_cfg(tmp_path), tmp_path, "2026-07-20", deps)
+    assert "PLAYLIST_URL" in str(exc.value)
+    assert "The playlist does not exist." in str(exc.value)
+
+
+def test_main_reports_setup_errors_without_a_traceback(monkeypatch, tmp_path, capsys):
+    import pytest
+    def boom(cfg, root, processed, deps):
+        raise poll.SetupError("yt-dlp is not on PATH. Install it.")
+    monkeypatch.setattr(poll, "run", boom)
+    _stub_main_config(monkeypatch, tmp_path)
+    with pytest.raises(SystemExit) as exc:
+        poll.main()
+    assert exc.value.code == 1
+    assert "Traceback" not in capsys.readouterr().err

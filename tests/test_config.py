@@ -206,3 +206,51 @@ def test_import_db_path_must_not_be_empty(tmp_path):
     env.write_text("PLAYLIST_URL=https://x\nVAULT_DIR=/v\nIMPORT_DB_PATH=\n")
     with pytest.raises(ValueError, match="IMPORT_DB_PATH must be a path"):
         load_config(env)
+
+
+def test_missing_config_file_names_the_fix(tmp_path):
+    from src.config import ConfigError
+    with pytest.raises(ConfigError, match="cp config.env.example config.env"):
+        load_config(tmp_path / "config.env")
+
+
+@pytest.mark.parametrize("text, key", [
+    ("VAULT_DIR=/v\n", "PLAYLIST_URL"),
+    ("PLAYLIST_URL=https://x\n", "VAULT_DIR"),
+    ("PLAYLIST_URL=\nVAULT_DIR=/v\n", "PLAYLIST_URL"),
+])
+def test_required_settings_are_named(tmp_path, text, key):
+    from src.config import ConfigError
+    env = tmp_path / "config.env"
+    env.write_text(text)
+    with pytest.raises(ConfigError, match=f"{key} is not set"):
+        load_config(env)
+
+
+def test_example_placeholders_are_rejected(tmp_path):
+    from src.config import ConfigError
+    example = (Path(__file__).resolve().parent.parent / "config.env.example").read_text()
+    env = tmp_path / "config.env"
+    env.write_text(example)
+    with pytest.raises(ConfigError, match="PLAYLIST_URL still has the example value"):
+        load_config(env)
+    env.write_text(example.replace("YOUR_PLAYLIST_ID", "PLexample"))
+    with pytest.raises(ConfigError, match="VAULT_DIR still has the example value"):
+        load_config(env)
+
+
+def test_vault_dir_must_be_absolute(tmp_path):
+    from src.config import ConfigError
+    env = tmp_path / "config.env"
+    env.write_text("PLAYLIST_URL=https://x\nVAULT_DIR=notes/vault\n")
+    with pytest.raises(ConfigError, match="VAULT_DIR must be an absolute path"):
+        load_config(env)
+
+
+def test_load_config_or_exit_prints_the_message_and_exits_2(tmp_path, capsys):
+    from src.config import load_config_or_exit
+    with pytest.raises(SystemExit) as exc:
+        load_config_or_exit(tmp_path / "config.env")
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "config.env" in err and "Traceback" not in err
