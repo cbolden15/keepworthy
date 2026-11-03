@@ -1,4 +1,4 @@
-"""Atomic handoff from the homelab transcriber to Open Brain's canonical writer."""
+"""Atomic handoff of captures to an external writer through a spool directory."""
 
 from __future__ import annotations
 

@@ -113,7 +113,7 @@ def make_server(cfg) -> ThreadingHTTPServer:
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     project_root = Path(__file__).resolve().parent.parent
-    cfg = config_mod.load_config(project_root / "config.env")
+    cfg = config_mod.load_config_or_exit(project_root / "config.env")
     srv = make_server(cfg)
     log.info("brain-ingest listening on %s:%d", cfg.ingest_bind, srv.server_address[1])
     srv.serve_forever()

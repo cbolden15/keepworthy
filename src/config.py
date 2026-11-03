@@ -1,4 +1,5 @@
 import logging
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -117,8 +118,42 @@ def _parse_env(text: str) -> dict:
         out[key.strip()] = val.strip()
     return out
 
+class ConfigError(ValueError):
+    """A config.env problem the owner fixes by editing the file."""
+
+# Values copied verbatim from config.env.example; running with them is a setup mistake.
+_EXAMPLE_VALUES = {
+    "PLAYLIST_URL": "YOUR_PLAYLIST_ID",
+    "VAULT_DIR": "/absolute/path/to/your/vault",
+}
+
+def _check_required(path: Path, raw: dict) -> None:
+    for key in ("PLAYLIST_URL", "VAULT_DIR"):
+        if not raw.get(key):
+            raise ConfigError(f"{key} is not set in {path}. See config.env.example.")
+        if _EXAMPLE_VALUES[key] in raw[key]:
+            raise ConfigError(f"{key} still has the example value in {path}. "
+                              f"Set it to your own value.")
+    if not Path(raw["VAULT_DIR"]).expanduser().is_absolute():
+        raise ConfigError(f"VAULT_DIR must be an absolute path, got {raw['VAULT_DIR']!r}.")
+
+def load_config_or_exit(path: Path, environment: Mapping[str, str] | None = None) -> Config:
+    """load_config for command entry points: a bad config prints one line and exits 2."""
+    try:
+        return load_config(path, environment)
+    except ValueError as e:
+        print(f"config error: {e}", file=sys.stderr)
+        raise SystemExit(2)
+
 def load_config(path: Path, environment: Mapping[str, str] | None = None) -> Config:
-    raw = _parse_env(Path(path).read_text())
+    try:
+        text = Path(path).read_text()
+    except FileNotFoundError:
+        raise ConfigError(f"No config file at {path}. Create it with "
+                          f"`cp config.env.example config.env`, then set "
+                          f"PLAYLIST_URL and VAULT_DIR.") from None
+    raw = _parse_env(text)
+    _check_required(path, raw)
     if environment is not None and environment.get("OPEN_BRAIN_SPOOL_DIR"):
         raw["OPEN_BRAIN_SPOOL_DIR"] = environment["OPEN_BRAIN_SPOOL_DIR"]
     if environment is not None and environment.get("OPEN_BRAIN_SAVED_SPOOL_DIR"):
@@ -159,7 +194,7 @@ def load_config(path: Path, environment: Mapping[str, str] | None = None) -> Con
         finance_content = load_finance_content(Path(get("SURE_CONTEXT_CONFIG")).expanduser())
     return Config(
         playlist_url=raw["PLAYLIST_URL"],
-        vault_dir=Path(raw["VAULT_DIR"]),
+        vault_dir=Path(raw["VAULT_DIR"]).expanduser(),
         subfolder=get("SUBFOLDER"),
         model=get("MODEL"),
         prompt_path=Path(get("PROMPT_PATH")),

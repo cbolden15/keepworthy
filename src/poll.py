@@ -1,5 +1,6 @@
 import logging
 import os
+import subprocess
 import tempfile
 from contextlib import closing
 from functools import partial
@@ -162,11 +163,26 @@ def _discover_channel_videos(cfg, deps) -> None:
         elif queued:
             log.info("channel %s queued %s", url, ", ".join(queued))
 
+class SetupError(RuntimeError):
+    """A missing tool or unusable setting the owner must fix before polling works."""
+
+def _playlist_ids(cfg, deps) -> list[str]:
+    try:
+        return deps.list_playlist_ids(cfg.playlist_url)
+    except FileNotFoundError:
+        raise SetupError("yt-dlp is not on PATH. Install it (for example "
+                         "`brew install yt-dlp` or `pipx install yt-dlp`) and run again.") from None
+    except subprocess.CalledProcessError as e:
+        lines = [ln.strip() for ln in (e.stderr or "").splitlines() if ln.strip()]
+        detail = lines[-1][:300] if lines else f"exit status {e.returncode}"
+        raise SetupError(f"yt-dlp could not list PLAYLIST_URL: {detail} "
+                         "Check that the playlist exists and is public or unlisted.") from None
+
 def run(cfg, project_root, processed, deps) -> list:
     _discover_channel_videos(cfg, deps)
     st = state.load_state(cfg.state_path)
     ids = list(dict.fromkeys([
-        *deps.list_playlist_ids(cfg.playlist_url),
+        *_playlist_ids(cfg, deps),
         *state.requested_videos(st),
     ]))
     results = []
@@ -180,10 +196,14 @@ def run(cfg, project_root, processed, deps) -> list:
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     project_root = Path(__file__).resolve().parent.parent
-    cfg = config_mod.load_config(project_root / "config.env", environment=os.environ)
+    cfg = config_mod.load_config_or_exit(project_root / "config.env", environment=os.environ)
     log.info(_capture_mode_line(article.capture_mode()))
     processed = date.today().isoformat()
-    results = run(cfg, project_root, processed, _default_deps(cfg))
+    try:
+        results = run(cfg, project_root, processed, _default_deps(cfg))
+    except SetupError as e:
+        log.error("%s", e)
+        raise SystemExit(1)
     for vid, outcome in results:
         log.info("processed %s → %s", vid, outcome)
     if not results:
