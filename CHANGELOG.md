@@ -1,7 +1,16 @@
 # Changelog
 
-## 0.4.0 — Unreleased
+## 0.4.0 — 2026-11-03
 
+The first tagged release. It includes the 0.3.0 changes below.
+
+- First-run setup mistakes print one line naming the fix instead of a Python
+  traceback: a missing `config.env`, an unset or example `PLAYLIST_URL` or
+  `VAULT_DIR`, a relative `VAULT_DIR`, a missing `yt-dlp`, or a playlist
+  yt-dlp can't list. Config errors exit 2 and other setup errors exit 1.
+  `VAULT_DIR` now expands a leading `~`.
+- README: list the requirements and install steps, and mark which features
+  are optional. The iOS Shortcut guide no longer assumes a particular network.
 - Import bookmark files: Netscape bookmark HTML (Firefox, Chrome, Safari),
   Pocket `list.csv`, and Raindrop CSV, with `--dry-run`, `--folder`, `--tag`,
   `--since`, and `--why`. `python -m src.importer status` and `cancel` manage
@@ -22,7 +31,7 @@
 - The poll log names imported links by their dedupe key, not their URL, and
   logs only the error type when their fetch fails.
 
-## 0.3.0 — Unreleased
+## 0.3.0 — not released on its own; shipped in 0.4.0
 
 - Capture articles, newsletter web pages, and PDFs shared through `/share`.
   Notes keep the full extracted text in a collapsed callout; the model reads

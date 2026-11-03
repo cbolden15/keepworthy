@@ -6,12 +6,12 @@ Runs the same fetch -> clean -> summarize -> note path as the timer
 each one seen so a later playlist tick won't reprocess it.
 
 Auth: needs CLAUDE_CODE_OAUTH_TOKEN in the environment and claude/yt-dlp on PATH,
-exactly like the systemd unit. Example (homelab):
+exactly like the systemd unit. Example, from your checkout:
 
-    cd ~/Projects/youtube-obsidian-summarizer
-    env PATH=/home/example/.local/bin:/usr/local/bin:/usr/bin:/bin HOME="$HOME" \\
-      CLAUDE_CODE_OAUTH_TOKEN="$(sed -n 's/^CLAUDE_CODE_OAUTH_TOKEN=//p' ~/.config/yt-obsidian/token)" \\
-      python3 backfill.py https://www.youtube.com/watch?v=ID1 ID2 ...
+    cd ~/Projects/keepworthy
+    env PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" HOME="$HOME" \\
+      CLAUDE_CODE_OAUTH_TOKEN="$(sed -n 's/^CLAUDE_CODE_OAUTH_TOKEN=//p' ~/.config/youtube-obsidian/auth.env)" \\
+      python3.12 backfill.py https://www.youtube.com/watch?v=ID1 ID2 ...
 
 Accepts full watch URLs, youtu.be links, or bare 11-char video IDs.
 """

@@ -2,26 +2,46 @@
 
 **Make something of what you save.**
 
-Keepworthy turns saved YouTube videos and social posts into categorized Markdown notes.
-Notes keep source links, capture intent, full detected speech, and image/frame
-observations when media processing is enabled.
+Keepworthy turns what you save into categorized Markdown notes: YouTube videos,
+social posts, articles, PDFs, and bookmark exports from your browser, Pocket, or
+Raindrop. Notes keep the source link, why you saved it, the full transcript or
+extracted text, and image/frame observations when media processing is enabled.
+
+It is a command-line tool for people comfortable editing a config file and
+running Python. There is no installer or web app.
+
+Only the YouTube playlist path is required. Everything else is optional:
+
+- [Daily saved posts](#daily-saved-posts) from Instagram, Facebook, and Threads (needs a cookie file)
+- [Articles and PDFs](#articles-and-pdfs) shared through `/share`
+- [Importing bookmarks](#importing-bookmarks)
+- [Linux media sandboxes and Sure finance context](#optional-private-media-and-finance), for advanced setups
 
 ## Start with YouTube
 
-Transcript-only processing runs on macOS or Linux with Python 3.12, yt-dlp, and
-an authenticated Claude Code CLI on PATH. No root helper is required. The CLI
-must support tool restrictions and strict empty MCP configuration; the direct
-path was checked with Claude Code 2.1.310. CLI authentication/billing follows
-your own account configuration.
+You need macOS or Linux and:
+
+1. Python 3.12 (`brew install python@3.12` on macOS).
+2. [yt-dlp](https://github.com/yt-dlp/yt-dlp) on `PATH` (`brew install yt-dlp` or `pipx install yt-dlp`).
+3. [Claude Code](https://docs.claude.com/en/docs/claude-code) on `PATH`, signed in
+   once by running `claude`. Model use is billed to your own Claude account. The
+   CLI must support tool restrictions and strict empty MCP configuration; this
+   path was checked with Claude Code 2.1.310.
+
+No root helper is required for this path.
 
 ```sh
 git clone https://github.com/cbolden15/keepworthy.git
 cd keepworthy
 cp config.env.example config.env
-# Edit PLAYLIST_URL and VAULT_DIR. Use an absolute vault path.
+# Set PLAYLIST_URL to a public or unlisted playlist and VAULT_DIR to an absolute folder.
 chmod 600 config.env
 python3.12 -m src.poll
 ```
+
+A setup mistake prints one line naming what to fix, such as an unset
+`VAULT_DIR` or a missing `yt-dlp`. Config errors exit 2; other setup errors
+exit 1. Run it on a schedule with the [deployment examples](deploy.md).
 
 The normal model call has no tools, MCP servers, project hooks, or persistent
 session. Image reading requires the optional Linux sandbox; it does not grant
