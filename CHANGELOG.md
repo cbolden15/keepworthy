@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.0 — Unreleased
+
+- Import bookmark files: Netscape bookmark HTML (Firefox, Chrome, Safari),
+  Pocket `list.csv`, and Raindrop CSV, with `--dry-run`, `--folder`, `--tag`,
+  `--since`, and `--why`. `python -m src.importer status` and `cancel` manage
+  an import.
+- Drip imported links into the social queue from a private SQLite ledger, at
+  most `IMPORT_DAILY_LIMIT` per UTC day (default 20), newest saved first and
+  always behind live shares.
+- Mark imported notes `capture_source: "import"`. The bookmark's title and
+  save date fill in when the page has none, and its folder and tags become
+  note tags.
+- Add the `dead-link` note status for imported links: HTTP 404 or 410 on the
+  first try, or a host that has stayed missing for at least a day and
+  `MAX_ATTEMPTS` tries. No model call is made for them.
+- Add the `IMPORT_DB_PATH` and `IMPORT_DAILY_LIMIT` settings.
+- Security: the fallback page fetch for media posts now goes through the
+  article reader's address checks and sends no cookies, and yt-dlp and
+  gallery-dl get the cookie file only for social hosts (issue #2).
+- The poll log names imported links by their dedupe key, not their URL, and
+  logs only the error type when their fetch fails.
+
 ## 0.3.0 — Unreleased
 
 - Capture articles, newsletter web pages, and PDFs shared through `/share`.

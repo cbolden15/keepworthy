@@ -53,3 +53,19 @@
 - **Extraction CPU time is unbounded:** the 60 s fetch deadline covers the
   network read only. HTML parsing and PDF text extraction run after it with no
   time limit.
+- **Pocket tag separator:** Pocket's `list.csv` separates tags with `|`, not
+  `,`. Raindrop uses `,`.
+- **Raindrop columns vary:** column names and the folder nesting separator
+  differ between Raindrop export versions. The parser matches columns by
+  name, case-insensitive, and an export missing `url` or `created` fails with
+  the column named. Run a new export through `--dry-run` first.
+- **Two calendars:** the import drip counts its daily limit per UTC day, while
+  a note's `processed:` date and filename use the local date.
+- **`fetch_page_text` has no opener:** it fetches through `article._fetch` now.
+  The `cookies_path` and `opener` parameters are accepted and ignored so old
+  callers keep working; tests pass `resolver` and `connector` fakes instead.
+- **A missing host may only mean offline:** macOS `getaddrinfo` returns
+  `EAI_NONAME` for every name while the machine is offline (glibc returns
+  `EAI_AGAIN`). An imported link therefore waits a day, as well as
+  `MAX_ATTEMPTS` tries, before a missing host becomes a `dead-link` note. The
+  first miss is stamped on the queue item as `import_missing_since`.

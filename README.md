@@ -126,10 +126,90 @@ fetch gets 60 seconds (over HTTPS the worst case is about 80 seconds). A fetch
 follows at most 5 redirects and reads at most 5 MB of HTML, or 20 MB and 300
 pages of PDF.
 
-These checks cover the article reader only. When a share falls back to the
-media tools (a partial read other than capped text, or an unsupported type),
-the existing fallback runs as before: a page metadata fetch and yt-dlp, with
-the configured cookie file and without the article reader's address checks.
+When a share falls back to the media tools (a partial read other than capped
+text, or an unsupported type), the page metadata fetch goes through the same
+checks and sends no cookies. yt-dlp and gallery-dl get the configured cookie
+file only for Instagram, Facebook, Threads, X, and YouTube links, never for
+other hosts.
+
+## Importing bookmarks
+
+Keepworthy can import a backlog of saved links from three kinds of export:
+
+- Browser bookmarks: "Export bookmarks to HTML" in Firefox, Chrome, or Safari.
+- Pocket: the `list.csv` file from Pocket's export page.
+- Raindrop.io: the CSV export.
+
+Run a dry run first. It prints the counts and writes nothing:
+
+```sh
+python3.12 -m src.importer import ~/Downloads/bookmarks.html --dry-run
+python3.12 -m src.importer import ~/Downloads/bookmarks.html
+python3.12 -m src.importer status
+python3.12 -m src.importer cancel 3 --yes
+```
+
+Run these from the project root; they read `config.env` like the poll job.
+Both runs print six counts: `found`, `new`, `already seen` (in the ledger,
+already processed, or earlier in the same file), `filtered out`,
+`unsupported scheme` (only `http` and `https` links are kept), and `bad rows`.
+A real run also prints the import id. The format is detected from the file;
+`--format netscape|pocket|raindrop` skips detection.
+
+Filters narrow an import:
+
+- `--folder Reading/Infra` keeps that folder and its sub-folders,
+  case-insensitive.
+- `--tag python` keeps bookmarks with that tag. Repeat it to accept any of
+  several tags.
+- `--since 2024-01-01` keeps bookmarks saved on or after that day. Bookmarks
+  without a save date are dropped when `--since` is given.
+
+Each link needs a `why`, the same one-line reason a share carries. Keepworthy
+builds it from the file: a Raindrop note when there is one, otherwise a line
+such as `Imported from Pocket. Tags: python, async.` or
+`Imported from browser bookmarks. Folder: Reading/Infra.`. `--why "Q3 research:"`
+puts your own text in front. The result is cut to 280 characters.
+
+Imported links go into a ledger at `IMPORT_DB_PATH` (default
+`state/import.db`), and each poll run moves a few of them into the social
+queue. `IMPORT_DAILY_LIMIT` (default 20, 0 to 500, 0 turns it off) caps how
+many per UTC day, newest saved first. Each one costs a model call, the same as
+a share, so the cap also caps spend. Imported links always wait behind live
+shares: a link you share during an import is processed first. `status` prints
+how many links are waiting, sent, and sent today, and how many days the rest
+will take at the current limit.
+
+`cancel <id>` prints how many unsent links that import still has.
+`cancel <id> --yes` deletes them and marks the import cancelled. Links that
+were already sent stay deduplicated. A poll that is moving links into the
+queue at that moment can still send the links it already picked up. Importing
+the same file again does nothing while its import is active and prints the
+date and id of that import. After a cancel the file can be imported again, for
+example with narrower filters.
+
+Notes from an import carry `capture_source: "import"`. When the page gives no
+title or date, the bookmark's own title and save date fill in, and the
+bookmark's folder names and tags are added to the note's tags. A web link (not
+Instagram, Facebook, Threads, X or YouTube) whose page answers 404 or 410
+becomes a short note with `status: "dead-link"` on the first try, with no
+model call. A host that no longer exists is retried for at least a day, and at
+least `MAX_ATTEMPTS` times, before the same `dead-link` note.
+
+An import file may be at most 50 MB and hold at most 50,000 bookmarks; over
+either, the import stops before writing anything. A link longer than 4,096
+characters, or an `http` link with no host, counts as a bad row. Folders
+nested deeper than 64 levels are cut at that depth, and the bookmarks inside
+are kept.
+
+The ledger is a local SQLite file, created owner-only (0600), holding the
+links, titles, folders, tags and notes from the file. The importer prints
+counts and the import id only. In the poll log an imported link appears by its
+dedupe key (`url:<sha1>`), and a failure logs only the error type. One line can
+still name the URL: a yt-dlp or gallery-dl failure. Links to Instagram,
+Facebook, Threads, X and YouTube go to those tools first; other links reach
+them only when the page is an unsupported type or was read only in part, and
+not when it answered 404 or 410.
 
 ## Optional private media and finance
 
@@ -169,8 +249,10 @@ Credentials, cookie jars, private deployment files, notes, downloaded source
 media, operational databases, and local worktrees belong outside Git. Original
 image/video downloads are temporary; notes retain observations and full detected
 speech rather than source media files. The discovery database retains URLs and
-captions for deduplication while enabled. Back up notes plus queue/processing
-state and the discovery database together, preserving private permissions.
+captions for deduplication while enabled. The import ledger
+(`state/import.db`) keeps imported links with their titles, folders, tags, and
+notes. Back up notes plus queue/processing state, the discovery database, and
+the import ledger together, preserving private permissions.
 Deleting a source from those stores while it remains saved upstream can cause
 rediscovery. Do not publish local runbooks or real account/holding snapshots.
 

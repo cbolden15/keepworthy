@@ -1,0 +1,6 @@
+﻿title,url,time_added,tags,status
+Async patterns,https://example.com/async,1700000000,python|async,unread
+Sourdough notes,https://example.org/bread,1690000000,,archive
+Empty link,,1695000000,misc,unread
+Old essay,http://example.com/old,1600000000,reading|python,unread
+Undated,https://example.org/undated,,,unread

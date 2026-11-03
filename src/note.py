@@ -269,6 +269,9 @@ def _social_frontmatter(post_meta: dict, model_meta: dict, status: str, processe
     source_type = post_meta.get("source_type") or ("web" if platform == "generic" else "social")
     content_kind = post_meta.get("content_kind") or model_meta.get("content_kind") or "other"
     tags = [platform] + [t for t in model_meta.get("tags", []) if t != platform]
+    for tag in post_meta.get("import_tags") or []:      # an imported bookmark's folder and tags
+        if tag not in tags:
+            tags.append(tag)
     kind = post_meta.get("kind", "text")
     if kind is None:
         kind = "text"
@@ -364,6 +367,8 @@ def build_social_stub_note(post_meta, status, shared_text, processed,
             "fetch-failed": "Could not fetch this post; saved for manual review.",
             "summary-failed": "Summarization failed after repeated attempts.",
             "invalid": "This share arrived without a usable url; saved for manual review.",
+            "dead-link": ("This link is gone (http 404/410 or the host no longer exists); "
+                          "saved for reference."),
         }.get(status, "Not summarized.")
     shared = f"\n\n> Shared note: {shared_text}" if shared_text else ""
     return (f"{fm}\n\n{_capture_context(post_meta)}{reason}\n\n"

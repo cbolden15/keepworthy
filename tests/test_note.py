@@ -693,3 +693,31 @@ def test_build_social_stub_note_reason_override():
     assert 'status: "invalid"' in out
     assert "This url was refused (private or non-http address)" in out
     assert "arrived without a usable url" not in out and "stub_reason" not in out
+
+
+def test_social_frontmatter_appends_import_tags_once():
+    pm = {"platform": "generic", "url": "https://example.com/a", "title": "T", "kind": "text",
+          "import_tags": ["Reading", "python", "generic", "second-brain"]}
+    out = build_social_note(pm, {"category": "ai-dev", "tags": ["python", "agents"]},
+                            "body", None, "2026-11-01")
+    assert 'tags: ["generic", "python", "agents", "Reading", "second-brain"]' in out
+    stub = build_social_stub_note(pm, "fetch-failed", None, "2026-11-01")
+    assert 'tags: ["generic", "Reading", "python", "second-brain"]' in stub
+
+
+def test_social_frontmatter_tags_unchanged_without_import_tags():
+    pm = {"platform": "generic", "url": "https://example.com/a", "title": "T", "kind": "text"}
+    out = build_social_note(pm, {"category": "ai-dev", "tags": ["python", "generic"]},
+                            "body", None, "2026-11-01")
+    assert 'tags: ["generic", "python"]' in out
+    assert "import_tags" not in out
+
+
+def test_stub_note_dead_link_reason():
+    pm = {"platform": "generic", "url": "https://example.com/gone", "kind": "text",
+          "title": "Bookmark title", "capture_source": "import"}
+    out = build_social_stub_note(pm, "dead-link", None, "2026-11-01")
+    assert 'status: "dead-link"' in out
+    assert ("This link is gone (http 404/410 or the host no longer exists); "
+            "saved for reference.") in out
+    assert "Not summarized." not in out

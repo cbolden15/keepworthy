@@ -198,6 +198,12 @@ def test_no_cookie_jar_and_user_agent(tmp_path, monkeypatch):
     assert not any("secret" in v for v in headers.values())
 
 
+def test_fetch_user_agent_override():
+    net = FakeNet(_html())
+    article._fetch("https://example.com/", net.resolver, net.connector, user_agent="Agent/1")
+    assert net.requests[0]["headers"]["User-Agent"] == "Agent/1"
+
+
 def test_pinned_https_connection_verifies_url_host(monkeypatch):
     conn = article._connect(PUBLIC_IP, 443, "example.com", "https")
     assert (conn.host, conn.port, conn.timeout) == (PUBLIC_IP, 443, article.TIMEOUT_S)
@@ -714,3 +720,39 @@ def test_capture_mode_falls_back_when_either_import_is_missing(monkeypatch):
     assert article.capture_mode() == {"mode": "fallback", "trafilatura": "0-test", "pypdf": None}
     monkeypatch.setattr(article, "_pypdf", _stub_pypdf())
     assert article.capture_mode() == {"mode": "full", "trafilatura": "0-test", "pypdf": "0-test"}
+
+
+@pytest.mark.parametrize("errno", sorted({socket.EAI_NONAME,
+                                          getattr(socket, "EAI_NODATA", socket.EAI_NONAME)}))
+def test_missing_host_raises_no_such_host(errno):
+    def resolver(host, port, *args, **kwargs):
+        raise socket.gaierror(errno, "nodename nor servname provided, or not known")
+    with pytest.raises(article.NoSuchHost) as err:
+        article._fetch("https://example.com/", resolver, FakeNet().connector)
+    assert isinstance(err.value, FetchError)
+    assert str(err.value).startswith("could not resolve example.com: ")   # the text a share always had
+
+
+@pytest.mark.parametrize("error", [socket.gaierror(socket.EAI_AGAIN, "temporary failure"),
+                                   OSError("network is unreachable")])
+def test_other_resolver_errors_stay_plain_fetch_error(error):
+    def resolver(host, port, *args, **kwargs):
+        raise error
+    with pytest.raises(FetchError) as err:
+        article._fetch("https://example.com/", resolver, FakeNet().connector)
+    assert not isinstance(err.value, article.NoSuchHost)
+
+
+def test_extraction_failure_log_can_leave_out_the_url(monkeypatch, caplog):
+    def broken(*args, **kwargs):
+        raise RuntimeError("bad markup")
+    monkeypatch.setattr(article, "_trafilatura", SimpleNamespace(extract=broken,
+                                                                 extract_metadata=broken))
+    with caplog.at_level("WARNING", logger="yt-obsidian"):
+        shared = FakeNet(_html()).fetch("https://example.com/shared")
+        net = FakeNet(_html())
+        imported = article.fetch_article("https://example.com/imported", resolver=net.resolver,
+                                         connector=net.connector, log_url=False)
+    assert shared["reason"] == imported["reason"] == "unreadable html"
+    assert caplog.messages == ["html extraction failed for https://example.com/shared: RuntimeError",
+                               "html extraction failed: RuntimeError"]

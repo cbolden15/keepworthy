@@ -375,7 +375,7 @@ def test_run_skips_seen(tmp_path):
 def _stub_main_config(monkeypatch, tmp_path):
     env = tmp_path / "config.env"
     env.write_text(f"PLAYLIST_URL=https://x\nVAULT_DIR={tmp_path}/vault\n"
-                   f"STATE_PATH={tmp_path}/s.json\n")
+                   f"STATE_PATH={tmp_path}/s.json\nIMPORT_DB_PATH={tmp_path}/import.db\n")
     real_load = poll.config_mod.load_config
     monkeypatch.setattr(
         poll.config_mod,

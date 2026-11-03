@@ -1,4 +1,7 @@
 from pathlib import Path
+
+import pytest
+
 from src.config import load_config, Config, _parse_subtopics, normalize_channel_url
 
 def test_load_config_parses_env(tmp_path):
@@ -169,3 +172,37 @@ def test_saved_spool_dir_from_file_and_environment(tmp_path):
     assert cfg.open_brain_saved_spool_dir == Path("~/yt-staging/open-brain-saved").expanduser()
     override = load_config(env, environment={"OPEN_BRAIN_SAVED_SPOOL_DIR": "/srv/saved"})
     assert override.open_brain_saved_spool_dir == Path("/srv/saved")
+
+
+
+def test_import_settings_default(tmp_path):
+    env = tmp_path / "config.env"
+    env.write_text("PLAYLIST_URL=https://x\nVAULT_DIR=/v\n")
+    cfg = load_config(env)
+    assert cfg.import_db_path == Path("state/import.db")
+    assert cfg.import_daily_limit == 20
+
+
+@pytest.mark.parametrize("value,expected", [("7", 7), ("0", 0), ("500", 500)])
+def test_import_daily_limit_accepts_0_to_500(tmp_path, value, expected):
+    env = tmp_path / "config.env"
+    env.write_text(f"PLAYLIST_URL=https://x\nVAULT_DIR=/v\nIMPORT_DAILY_LIMIT={value}\n"
+                   f"IMPORT_DB_PATH={tmp_path}/ledger.db\n")
+    cfg = load_config(env)
+    assert cfg.import_daily_limit == expected
+    assert cfg.import_db_path == tmp_path / "ledger.db"
+
+
+@pytest.mark.parametrize("value", ["501", "-1", "abc"])
+def test_import_daily_limit_rejects_out_of_range(tmp_path, value):
+    env = tmp_path / "config.env"
+    env.write_text(f"PLAYLIST_URL=https://x\nVAULT_DIR=/v\nIMPORT_DAILY_LIMIT={value}\n")
+    with pytest.raises(ValueError, match="IMPORT_DAILY_LIMIT must be between 0 and 500"):
+        load_config(env)
+
+
+def test_import_db_path_must_not_be_empty(tmp_path):
+    env = tmp_path / "config.env"
+    env.write_text("PLAYLIST_URL=https://x\nVAULT_DIR=/v\nIMPORT_DB_PATH=\n")
+    with pytest.raises(ValueError, match="IMPORT_DB_PATH must be a path"):
+        load_config(env)
