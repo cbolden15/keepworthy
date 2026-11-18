@@ -1,7 +1,14 @@
 import json
+import logging
 import subprocess
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from urllib.parse import parse_qs, urlsplit
+
+from src.transcript import clean_vtt
+
+log = logging.getLogger(__name__)
+_CAPTION_TIMEOUT_SECONDS = 120
 
 def _watch_url(video_id: str) -> str:
     return f"https://www.youtube.com/watch?v={video_id}"
@@ -80,15 +87,34 @@ def get_metadata(video_id: str, runner=subprocess.run) -> dict:
     }
 
 def fetch_captions_vtt(video_id: str, sub_lang: str, tmpdir, runner=subprocess.run) -> str | None:
-    tmpdir = Path(tmpdir)
-    out_tmpl = str(tmpdir / "%(id)s.%(ext)s")
-    runner(
-        ["yt-dlp", "--skip-download", "--write-auto-sub", "--write-sub",
-         "--sub-lang", sub_lang, "--sub-format", "vtt",
-         "-o", out_tmpl, _watch_url(video_id)],
-        capture_output=True, text=True, check=True,
-    )
-    vtts = sorted(tmpdir.glob(f"{video_id}*.vtt"))
-    if not vtts:
-        return None
-    return vtts[0].read_text()
+    """Return usable captions, trying English (Original) after the English track."""
+    tracks = ("en", "en-orig") if sub_lang == "en" else (sub_lang,)
+    last_error = None
+    for track in tracks:
+        # Each download gets a fresh directory so failures cannot leave usable-looking files.
+        with TemporaryDirectory(dir=tmpdir) as attempt_dir:
+            directory = Path(attempt_dir)
+            try:
+                runner(
+                    ["yt-dlp", "--skip-download", "--write-auto-sub", "--write-sub",
+                     "--sub-lang", track, "--sub-format", "vtt",
+                     "-o", str(directory / "%(id)s.%(ext)s"), _watch_url(video_id)],
+                    capture_output=True, text=True, check=True, timeout=_CAPTION_TIMEOUT_SECONDS,
+                )
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                last_error = exc
+                continue
+
+            for path in sorted(directory.glob(f"{video_id}*.vtt")):
+                try:
+                    captions = path.read_text(encoding="utf-8-sig")
+                except UnicodeDecodeError:
+                    continue
+                if captions.startswith("WEBVTT") and clean_vtt(captions).strip():
+                    if track != sub_lang:
+                        log.info("used %s caption fallback for %s", track, video_id)
+                    return captions
+
+    if last_error is not None:
+        raise last_error
+    return None

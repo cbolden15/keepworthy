@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Try English (Original) captions when YouTube's default English track
+  fails or has no usable captions.
+
 ## 0.4.0 — 2026-11-03
 
 The first tagged release. It includes the 0.3.0 changes below.

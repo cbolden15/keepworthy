@@ -39,11 +39,58 @@ def test_fetch_captions_none_when_no_file(tmp_path):
     assert media.fetch_captions_vtt("abc123", "en", tmp_path, runner=run) is None
 
 def test_fetch_captions_returns_vtt(tmp_path):
-    # simulate yt-dlp having written a vtt file
-    (tmp_path / "abc123.en.vtt").write_text("WEBVTT\n\nhello")
-    run = fake_runner("")
+    def run(cmd, **kw):
+        assert cmd[cmd.index("--sub-lang") + 1] == "en"
+        template = Path(cmd[cmd.index("-o") + 1])
+        template.with_name("abc123.en.vtt").write_text("WEBVTT\n\nhello")
+
     out = media.fetch_captions_vtt("abc123", "en", tmp_path, runner=run)
     assert out is not None and "hello" in out
+
+@pytest.mark.parametrize("first_attempt", ["rate-limited", "empty", "missing", "timed-out", "invalid"])
+def test_fetch_captions_uses_original_english_when_default_is_unusable(tmp_path, first_attempt):
+    def run(cmd, **kw):
+        track = cmd[cmd.index("--sub-lang") + 1]
+        template = Path(cmd[cmd.index("-o") + 1])
+        if track == "en":
+            if first_attempt == "rate-limited":
+                template.with_name("abc123.en.vtt").write_text("WEBVTT\n\nPartial download.")
+                raise subprocess.CalledProcessError(1, cmd, stderr="HTTP Error 429: Too Many Requests")
+            if first_attempt == "timed-out":
+                raise subprocess.TimeoutExpired(cmd, 120)
+            if first_attempt == "empty":
+                template.with_name("abc123.en.vtt").write_text("WEBVTT\n\n")
+            if first_attempt == "invalid":
+                template.with_name("abc123.en.vtt").write_bytes(b"WEBVTT\n\n\xff")
+        elif track == "en-orig":
+            template.with_name("abc123.en-orig.vtt").write_text("WEBVTT\n\nOriginal English captions.")
+
+    assert media.fetch_captions_vtt("abc123", "en", tmp_path, runner=run) == (
+        "WEBVTT\n\nOriginal English captions."
+    )
+
+def test_fetch_captions_keeps_download_error_when_original_track_is_missing(tmp_path):
+    def run(cmd, **kw):
+        if cmd[cmd.index("--sub-lang") + 1] == "en":
+            raise subprocess.CalledProcessError(1, cmd, stderr="HTTP Error 429: Too Many Requests")
+
+    with pytest.raises(subprocess.CalledProcessError, match="non-zero exit") as exc:
+        media.fetch_captions_vtt("abc123", "en", tmp_path, runner=run)
+    assert "HTTP Error 429" in exc.value.stderr
+
+def test_fetch_captions_propagates_original_track_error_when_default_is_missing(tmp_path):
+    def run(cmd, **kw):
+        if cmd[cmd.index("--sub-lang") + 1] == "en-orig":
+            raise subprocess.CalledProcessError(1, cmd, stderr="HTTP Error 429: Too Many Requests")
+
+    with pytest.raises(subprocess.CalledProcessError):
+        media.fetch_captions_vtt("abc123", "en", tmp_path, runner=run)
+
+def test_fetch_captions_respects_explicit_language(tmp_path):
+    def run(cmd, **kw):
+        assert cmd[cmd.index("--sub-lang") + 1] == "es"
+
+    assert media.fetch_captions_vtt("abc123", "es", tmp_path, runner=run) is None
 
 def test_list_channel_ids_command_shape():
     calls = []
