@@ -7,6 +7,7 @@ import pytest
 from src import media
 
 FIX = Path(__file__).parent / "fixtures"
+CAPTIONS = "WEBVTT\n\n00:00.000 --> 00:02.000\nOriginal English captions."
 
 def fake_runner(stdout):
     def _run(cmd, **kw):
@@ -42,10 +43,10 @@ def test_fetch_captions_returns_vtt(tmp_path):
     def run(cmd, **kw):
         assert cmd[cmd.index("--sub-lang") + 1] == "en"
         template = Path(cmd[cmd.index("-o") + 1])
-        template.with_name("abc123.en.vtt").write_text("WEBVTT\n\nhello")
+        template.with_name("abc123.en.vtt").write_text(CAPTIONS)
 
     out = media.fetch_captions_vtt("abc123", "en", tmp_path, runner=run)
-    assert out is not None and "hello" in out
+    assert out == CAPTIONS
 
 @pytest.mark.parametrize("first_attempt", ["rate-limited", "empty", "missing", "timed-out", "invalid"])
 def test_fetch_captions_uses_original_english_when_default_is_unusable(tmp_path, first_attempt):
@@ -54,7 +55,8 @@ def test_fetch_captions_uses_original_english_when_default_is_unusable(tmp_path,
         template = Path(cmd[cmd.index("-o") + 1])
         if track == "en":
             if first_attempt == "rate-limited":
-                template.with_name("abc123.en.vtt").write_text("WEBVTT\n\nPartial download.")
+                partial = CAPTIONS.replace("Original English captions.", "Partial download.")
+                template.with_name("abc123.en.vtt").write_text(partial)
                 raise subprocess.CalledProcessError(1, cmd, stderr="HTTP Error 429: Too Many Requests")
             if first_attempt == "timed-out":
                 raise subprocess.TimeoutExpired(cmd, 120)
@@ -63,11 +65,25 @@ def test_fetch_captions_uses_original_english_when_default_is_unusable(tmp_path,
             if first_attempt == "invalid":
                 template.with_name("abc123.en.vtt").write_bytes(b"WEBVTT\n\n\xff")
         elif track == "en-orig":
-            template.with_name("abc123.en-orig.vtt").write_text("WEBVTT\n\nOriginal English captions.")
+            template.with_name("abc123.en-orig.vtt").write_text(CAPTIONS)
 
-    assert media.fetch_captions_vtt("abc123", "en", tmp_path, runner=run) == (
-        "WEBVTT\n\nOriginal English captions."
-    )
+    assert media.fetch_captions_vtt("abc123", "en", tmp_path, runner=run) == CAPTIONS
+
+@pytest.mark.parametrize("metadata_only", [
+    "WEBVTT\nX-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:900000\n\n",
+    "WEBVTT\n\nNOTE no speech was detected\n\n",
+    "WEBVTT\n\nSTYLE\n::cue { color: white }\n\n",
+    "WEBVTT\n\ncue-1\n00:00.000 --> 00:02.000\n\n",
+])
+def test_fetch_captions_tries_original_when_primary_has_no_cue_text(tmp_path, metadata_only):
+    def run(cmd, **kw):
+        track = cmd[cmd.index("--sub-lang") + 1]
+        template = Path(cmd[cmd.index("-o") + 1])
+        template.with_name(f"abc123.{track}.vtt").write_text(
+            metadata_only if track == "en" else CAPTIONS
+        )
+
+    assert media.fetch_captions_vtt("abc123", "en", tmp_path, runner=run) == CAPTIONS
 
 def test_fetch_captions_keeps_download_error_when_original_track_is_missing(tmp_path):
     def run(cmd, **kw):

@@ -19,3 +19,11 @@ def test_clean_vtt_dedupes_rolling_lines():
 
 def test_clean_vtt_empty():
     assert clean_vtt("WEBVTT\n\n") == ""
+
+def test_clean_vtt_keeps_timed_text_without_metadata_or_cue_identifiers():
+    vtt = (
+        "WEBVTT\r\nX-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:900000\r\n\r\n"
+        "NOTE caption metadata\r\n\r\n"
+        "cue-1\r\n00:00.000 --> 00:03.000 align:start\r\nhello\r\n"
+    )
+    assert clean_vtt(vtt) == "hello"
